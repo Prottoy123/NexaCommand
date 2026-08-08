@@ -1,0 +1,45 @@
+# Dependency directories
+node_modules/
+
+# Environment variables (Critical Security)
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Prisma
+prisma/*.db
+prisma/*.db-journal
+
+# IDE / Editor Specific Files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI Editor / Agent Specifics (Windsurf/Claude)
+.agents/
+.claude/
+.windsurf/
+skills-lock.json
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
