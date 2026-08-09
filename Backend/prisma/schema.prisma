@@ -1,13 +1,78 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+// ==========================================
+// 1. TENANT & SUBSCRIPTION (SaaS Core)
+// ==========================================
+
+// ==========================================
+// 1. ENUMS (Global Definitions)
+// ==========================================
+enum BusinessType {
+  RETAIL
+  CORPORATE
+  AGENCY
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+}
+
+// [NEW] Subscription Enums
+enum PlanType {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+  LIFETIME   
+}
+
+// ==========================================
+// 2. TENANT & SUBSCRIPTION (SaaS Core)
+// ==========================================
+model Tenant {
+  id                 String             @id @default(uuid())
+  name               String
+  businessType       BusinessType
+  subscriptionStatus SubscriptionStatus @default(ACTIVE)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  subscription       PlatformSubscription?
+
+  @@map("tenants")
+}
+
+model PlatformSubscription {
+  id              String       @id @default(uuid())
+  
+  // 1-to-1 Relation Logic
+  tenantId        String       @unique
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  plan            PlanType     @default(FREE)
+  billingCycle    BillingCycle @default(LIFETIME)
+
+  startDate       DateTime     @default(now())
+  nextBillingDate DateTime?    
+
+  isActive        Boolean      @default(true)
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@map("platform_subscriptions")
 }
