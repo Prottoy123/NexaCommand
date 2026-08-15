@@ -70,7 +70,6 @@ model PlatformSubscription {
   nextBillingDate DateTime?    
 
   isActive        Boolean      @default(true)
-
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
