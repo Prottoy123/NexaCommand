@@ -7,11 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-
-// ==========================================
-// 1. TENANT & SUBSCRIPTION (SaaS Core)
-// ==========================================
-
 // ==========================================
 // 1. ENUMS (Global Definitions)
 // ==========================================
@@ -27,7 +22,6 @@ enum SubscriptionStatus {
   SUSPENDED
 }
 
-// [NEW] Subscription Enums
 enum PlanType {
   FREE
   PRO
@@ -40,25 +34,45 @@ enum BillingCycle {
   LIFETIME   
 }
 
+enum UserRole {
+  SUPER_ADMIN
+  ORG_OWNER
+  BRANCH_MANAGER
+  STAFF
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
 // ==========================================
-// 2. TENANT & SUBSCRIPTION (SaaS Core)
+// 2. TENANT & SUBSCRIPTION 
 // ==========================================
 model Tenant {
   id                 String             @id @default(uuid())
   name               String
   businessType       BusinessType
   subscriptionStatus SubscriptionStatus @default(ACTIVE)
+  
+  // Audit Trails
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
-
+  
+  // 1-to-1 Relation with Subscription
   subscription       PlatformSubscription?
+
+  // 1-to-Many Relations (Reverse mapping for Prisma)
+  branches           Branch[]
+  users              User[]
 
   @@map("tenants")
 }
 
 model PlatformSubscription {
   id              String       @id @default(uuid())
-  
+
   // 1-to-1 Relation Logic
   tenantId        String       @unique
   tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -74,4 +88,67 @@ model PlatformSubscription {
   updatedAt       DateTime     @updatedAt
 
   @@map("platform_subscriptions")
+}
+
+// ==========================================
+// 3. BRANCH & RBAC (Operations)
+// ==========================================
+model Branch {
+  id            String   @id @default(uuid())
+  
+  // Tenant Relation (Mandatory Isolation)
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  name          String
+  location      String
+  contactNumber String
+
+  // Manager Relation (1-to-1)
+  managerId     String?  @unique
+  manager       User?    @relation("BranchManager", fields: [managerId], references: [id])
+
+  // Staff Relation (1-to-Many)
+  staff         User[]   @relation("BranchStaff")
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("branches")
+}
+
+model User {
+  id               String     @id @default(uuid())
+  
+  // Tenant Relation
+  tenantId         String
+  tenant           Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Branch Relation (Staff belongs to a branch)
+  branchId         String?
+  branch           Branch?    @relation("BranchStaff", fields: [branchId], references: [id])
+
+  // Reverse relation for Manager
+  managedBranch    Branch?    @relation("BranchManager")
+
+  // Core Identity
+  email            String     @unique
+  fullName         String
+  password         String
+  
+  // Access Control
+  role             UserRole   
+  status           UserStatus @default(PENDING)
+
+  // Financial Data
+  baseSalary       Decimal    @default(0)
+  earnedCommission Decimal    @default(0)
+
+  // Auth Memory
+  refreshToken     String?
+
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  @@map("users")
 }
