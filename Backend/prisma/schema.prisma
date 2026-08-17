@@ -47,42 +47,78 @@ enum UserStatus {
   SUSPENDED
 }
 
+enum ItemType {
+  PHYSICAL_GOOD
+  DIGITAL_SERVICE
+}
+
+// [NEW] Billing & Finance Enums
+enum InvoiceType {
+  POS_RECEIPT
+  B2B_INVOICE
+}
+
+enum InvoiceStatus {
+  PAID
+  PENDING
+  OVERDUE
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  UNPAID
+}
+
+enum LedgerEventType {
+  POS_REVENUE
+  B2B_REVENUE
+  SALARY_PAID
+  EWA_ADVANCE
+  BOUNTY_CREDITED
+  REFUND_PROCESSED
+}
+
+enum EwaStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 // ==========================================
-// 2. TENANT & SUBSCRIPTION 
+// 2. TENANT & SUBSCRIPTION (SaaS Core)
 // ==========================================
 model Tenant {
   id                 String             @id @default(uuid())
   name               String
   businessType       BusinessType
   subscriptionStatus SubscriptionStatus @default(ACTIVE)
-  
-  // Audit Trails
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
   
-  // 1-to-1 Relation with Subscription
   subscription       PlatformSubscription?
-
-  // 1-to-Many Relations (Reverse mapping for Prisma)
+  
+  // 1-to-Many Relations
   branches           Branch[]
   users              User[]
+  catalogItems       CatalogItem[]
+  invoices           Invoice[]
+  ledgerEvents       LedgerEvent[]
+  ewaRequests        EwaRequest[]
+  auditLogs          AuditLog[]
 
   @@map("tenants")
 }
 
 model PlatformSubscription {
   id              String       @id @default(uuid())
-
-  // 1-to-1 Relation Logic
   tenantId        String       @unique
   tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
   plan            PlanType     @default(FREE)
   billingCycle    BillingCycle @default(LIFETIME)
-
   startDate       DateTime     @default(now())
   nextBillingDate DateTime?    
-
   isActive        Boolean      @default(true)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
@@ -95,8 +131,6 @@ model PlatformSubscription {
 // ==========================================
 model Branch {
   id            String   @id @default(uuid())
-  
-  // Tenant Relation (Mandatory Isolation)
   tenantId      String
   tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   
@@ -104,12 +138,12 @@ model Branch {
   location      String
   contactNumber String
 
-  // Manager Relation (1-to-1)
   managerId     String?  @unique
   manager       User?    @relation("BranchManager", fields: [managerId], references: [id])
-
-  // Staff Relation (1-to-Many)
   staff         User[]   @relation("BranchStaff")
+  
+  catalogItems  CatalogItem[]
+  invoices      Invoice[]
 
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -119,36 +153,169 @@ model Branch {
 
 model User {
   id               String     @id @default(uuid())
-  
-  // Tenant Relation
   tenantId         String
   tenant           Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-
-  // Branch Relation (Staff belongs to a branch)
+  
   branchId         String?
   branch           Branch?    @relation("BranchStaff", fields: [branchId], references: [id])
-
-  // Reverse relation for Manager
   managedBranch    Branch?    @relation("BranchManager")
-
-  // Core Identity
+  
   email            String     @unique
   fullName         String
   password         String
-  
-  // Access Control
   role             UserRole   
   status           UserStatus @default(PENDING)
-
-  // Financial Data
+  
   baseSalary       Decimal    @default(0)
   earnedCommission Decimal    @default(0)
-
-  // Auth Memory
   refreshToken     String?
-
+  
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
+  // Action Relations (Finance & Audit)
+  createdInvoices  Invoice[]    @relation("InvoiceCreator")
+  ewaRequests      EwaRequest[] @relation("EwaStaff")
+  approvedEwas     EwaRequest[] @relation("EwaApprover")
+  auditLogs        AuditLog[]   @relation("UserAudit")
+
   @@map("users")
+}
+
+// ==========================================
+// 4. THE UNIVERSAL CATALOG (Inventory & Services)
+// ==========================================
+model CatalogItem {
+  id              String    @id @default(uuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branchId        String?
+  branch          Branch?   @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  name            String
+  sku             String    
+  price           Decimal
+  itemType        ItemType
+
+  stock           Int?
+  lastRestockedAt DateTime?
+  isDeadStock     Boolean   @default(false)
+  bountyAmount    Decimal   @default(0)
+  imageUrl        String?
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  invoiceItems    InvoiceItem[]
+
+  @@map("catalog_items")
+}
+
+// ==========================================
+// 5. UNIFIED BILLING ENGINE
+// ==========================================
+model Invoice {
+  id              String        @id @default(uuid())
+  tenantId        String
+  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branchId        String
+  branch          Branch        @relation(fields: [branchId], references: [id])
+  
+  creatorId       String
+  creator         User          @relation("InvoiceCreator", fields: [creatorId], references: [id])
+
+  clientName      String?
+  clientPhone     String?
+  clientEmail     String?
+
+  invoiceType     InvoiceType
+  status          InvoiceStatus
+  
+  totalAmount     Decimal
+  discountAmount  Decimal       @default(0)
+  netPayable      Decimal
+  
+  paymentMethod   PaymentMethod
+  dueDate         DateTime?
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  items           InvoiceItem[]
+
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id              String      @id @default(uuid())
+  
+  invoiceId       String
+  invoice         Invoice     @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  catalogItemId   String
+  catalogItem     CatalogItem @relation(fields: [catalogItemId], references: [id])
+
+  quantity        Int
+  unitPrice       Decimal
+  subTotal        Decimal
+
+  @@map("invoice_items")
+}
+
+// ==========================================
+// 6. FINANCE & OPERATIONS (Immutable Core)
+// ==========================================
+model LedgerEvent {
+  id              String          @id @default(uuid())
+  tenantId        String
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  transactionId   String          @unique
+  eventType       LedgerEventType
+  
+  debitAccount    String
+  creditAccount   String
+  amount          Decimal
+
+  referenceId     String          // Polymorphic reference (Invoice ID, User ID etc.)
+  
+  createdAt       DateTime        @default(now())
+
+  @@map("ledger_events")
+}
+
+model EwaRequest {
+  id              String      @id @default(uuid())
+  tenantId        String
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  staffId         String
+  staff           User        @relation("EwaStaff", fields: [staffId], references: [id])
+
+  requestedAmount Decimal
+  status          EwaStatus   @default(PENDING)
+
+  approvedById    String?
+  approvedBy      User?       @relation("EwaApprover", fields: [approvedById], references: [id])
+  
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@map("ewa_requests")
+}
+
+model AuditLog {
+  id              String      @id @default(uuid())
+  tenantId        String
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  userId          String
+  user            User        @relation("UserAudit", fields: [userId], references: [id])
+
+  action          String
+  targetResource  String
+  
+  createdAt       DateTime    @default(now())
+
+  @@map("audit_logs")
 }
