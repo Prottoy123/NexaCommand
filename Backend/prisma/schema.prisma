@@ -52,7 +52,6 @@ enum ItemType {
   DIGITAL_SERVICE
 }
 
-// [NEW] Billing & Finance Enums
 enum InvoiceType {
   POS_RECEIPT
   B2B_INVOICE
@@ -86,6 +85,14 @@ enum EwaStatus {
   REJECTED
 }
 
+// [NEW] Reference Type for Polymorphic Relations
+enum ReferenceType {
+  INVOICE
+  EWA_REQUEST
+  USER
+  PAYROLL
+}
+
 // ==========================================
 // 2. TENANT & SUBSCRIPTION (SaaS Core)
 // ==========================================
@@ -99,7 +106,6 @@ model Tenant {
   
   subscription       PlatformSubscription?
   
-  // 1-to-Many Relations
   branches           Branch[]
   users              User[]
   catalogItems       CatalogItem[]
@@ -160,7 +166,7 @@ model User {
   branch           Branch?    @relation("BranchStaff", fields: [branchId], references: [id])
   managedBranch    Branch?    @relation("BranchManager")
   
-  email            String     @unique
+  email            String     
   fullName         String
   password         String
   role             UserRole   
@@ -173,12 +179,12 @@ model User {
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
-  // Action Relations (Finance & Audit)
   createdInvoices  Invoice[]    @relation("InvoiceCreator")
   ewaRequests      EwaRequest[] @relation("EwaStaff")
   approvedEwas     EwaRequest[] @relation("EwaApprover")
   auditLogs        AuditLog[]   @relation("UserAudit")
 
+  @@unique([email, tenantId]) // [FIXED] Composite Unique
   @@map("users")
 }
 
@@ -199,7 +205,8 @@ model CatalogItem {
 
   stock           Int?
   lastRestockedAt DateTime?
-  isDeadStock     Boolean   @default(false)
+  // isDeadStock Boolean @default(false) -> [REMOVED]
+  
   bountyAmount    Decimal   @default(0)
   imageUrl        String?
 
@@ -247,17 +254,17 @@ model Invoice {
 }
 
 model InvoiceItem {
-  id              String      @id @default(uuid())
+  id            String      @id @default(uuid())
   
-  invoiceId       String
-  invoice         Invoice     @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId     String
+  invoice       Invoice     @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   
-  catalogItemId   String
-  catalogItem     CatalogItem @relation(fields: [catalogItemId], references: [id])
+  catalogItemId String
+  catalogItem   CatalogItem @relation(fields: [catalogItemId], references: [id])
 
-  quantity        Int
-  unitPrice       Decimal
-  subTotal        Decimal
+  quantity      Int
+  unitPrice     Decimal
+  subTotal      Decimal
 
   @@map("invoice_items")
 }
@@ -277,8 +284,9 @@ model LedgerEvent {
   creditAccount   String
   amount          Decimal
 
-  referenceId     String          // Polymorphic reference (Invoice ID, User ID etc.)
-  
+  referenceId     String          
+  referenceType   ReferenceType   // [FIXED] Polymorphic Type
+
   createdAt       DateTime        @default(now())
 
   @@map("ledger_events")
