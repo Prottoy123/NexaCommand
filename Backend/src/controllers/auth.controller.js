@@ -1,41 +1,40 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import ApiError from "../utils/ApiError.js";
-import ApiResponse from "../utils/ApiResponse.js"; 
+import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import jwt from "jsonwebtoken";
 
-const prisma = new PrismaClient(); 
+const prisma = new PrismaClient();
 
 const generateAccessToken = async (user) => {
   return jwt.sign(
-     {
-       id: user.id,
-       email: user.email,
-       fullName: user.fullName,
-       role: user.role,
-     },
-     process.env.ACCESS_TOKEN_SECRET,
-     {
-       expiresIn: process.env.ACCESS_TOKEN_EXPIRY,
-     },
-   );
+    {
+      id: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      role: user.role,
+    },
+    process.env.ACCESS_TOKEN_SECRET,
+    {
+      expiresIn: process.env.ACCESS_TOKEN_EXPIRY,
+    },
+  );
 };
 
 const generateRefreshToken = async (user) => {
   return jwt.sign(
-     {
-       id: user.id,
-     },
-     process.env.REFRESH_TOKEN_SECRET,
-     {
-       expiresIn: process.env.REFRESH_TOKEN_EXPIRY,
-     },
-   );
+    {
+      id: user.id,
+    },
+    process.env.REFRESH_TOKEN_SECRET,
+    {
+      expiresIn: process.env.REFRESH_TOKEN_EXPIRY,
+    },
+  );
 };
 
 const registerTenant = asyncHandler(async (req, res) => {
-
   const { email, businessType, fullName, password, tenantName } = req.body;
 
   if (!email || !businessType || !fullName || !password || !tenantName) {
@@ -66,8 +65,8 @@ const registerTenant = asyncHandler(async (req, res) => {
           fullName: fullName,
           email: email,
           password: passwordHash,
-          role: "ORG_OWNER", 
-          status: "ACTIVE", 
+          role: "ORG_OWNER",
+          status: "ACTIVE",
         },
       },
     },
@@ -171,4 +170,26 @@ const loginTenant = asyncHandler(async (req, res) => {
     );
 });
 
-export { registerTenant, loginTenant };
+const logoutTenant = asyncHandler(async (req, res) => {
+  const loggedOutUser = await prisma.user.update({
+    where: { id: req.user.id },
+    data: { refreshToken: null },
+    select: {
+      id: true,
+    },
+  });
+
+  const options = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "none",
+  };
+
+  return res
+    .status(200)
+    .clearCookie("accessToken", options)
+    .clearCookie("refreshToken", options)
+    .json(new ApiResponse(200, {}, "User Logged Out Successfully"));
+});
+
+export { registerTenant, loginTenant,logoutTenant };
