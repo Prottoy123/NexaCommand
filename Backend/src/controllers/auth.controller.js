@@ -105,7 +105,7 @@ const registerTenant = asyncHandler(async (req, res) => {
     .json(new ApiResponse(201, newTenant, "Tenant registered successfully"));
 });
 
-const loginTenant = asyncHandler(async (req, res) => {
+const loginUser = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -170,7 +170,7 @@ const loginTenant = asyncHandler(async (req, res) => {
     );
 });
 
-const logoutTenant = asyncHandler(async (req, res) => {
+const logoutUser = asyncHandler(async (req, res) => {
   const loggedOutUser = await prisma.user.update({
     where: { id: req.user.id },
     data: { refreshToken: null },
@@ -192,4 +192,18 @@ const logoutTenant = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, {}, "User Logged Out Successfully"));
 });
 
-export { registerTenant, loginTenant,logoutTenant };
+const getCurrentUser = asyncHandler(async (req, res) => {
+  const currentUser = req.user;
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(
+        200,
+        { currentUser },
+        "Current User Fetched Successfully",
+      ),
+    );
+});
+
+export { registerTenant, loginUser,logoutUser };
