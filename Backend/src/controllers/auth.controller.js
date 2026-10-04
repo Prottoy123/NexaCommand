@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
 
 const prisma = new PrismaClient();
 
-const generateAccessToken = async (user) => {
+export const generateAccessToken = async (user) => {
   return jwt.sign(
     {
       id: user.id,
@@ -22,7 +22,7 @@ const generateAccessToken = async (user) => {
   );
 };
 
-const generateRefreshToken = async (user) => {
+export const generateRefreshToken = async (user) => {
   return jwt.sign(
     {
       id: user.id,
@@ -34,7 +34,7 @@ const generateRefreshToken = async (user) => {
   );
 };
 
-const registerTenant = asyncHandler(async (req, res) => {
+export const registerTenant = asyncHandler(async (req, res) => {
   const { email, businessType, fullName, password, tenantName } = req.body;
 
   if (!email || !businessType || !fullName || !password || !tenantName) {
@@ -105,7 +105,7 @@ const registerTenant = asyncHandler(async (req, res) => {
     .json(new ApiResponse(201, newTenant, "Tenant registered successfully"));
 });
 
-const loginUser = asyncHandler(async (req, res) => {
+export const loginUser = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -170,7 +170,7 @@ const loginUser = asyncHandler(async (req, res) => {
     );
 });
 
-const logoutUser = asyncHandler(async (req, res) => {
+export const logoutUser = asyncHandler(async (req, res) => {
   const loggedOutUser = await prisma.user.update({
     where: { id: req.user.id },
     data: { refreshToken: null },
@@ -192,7 +192,7 @@ const logoutUser = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, {}, "User Logged Out Successfully"));
 });
 
-const getCurrentUser = asyncHandler(async (req, res) => {
+export const getCurrentUser = asyncHandler(async (req, res) => {
   const currentUser = req.user;
 
   return res
@@ -266,4 +266,3 @@ export const refreshAccessToken = asyncHandler(async (req, res) => {
   }
 });
 
-export { registerTenant, loginUser,logoutUser };
