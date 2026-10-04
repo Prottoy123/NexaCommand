@@ -169,6 +169,7 @@ model User {
   email            String     
   fullName         String
   password         String
+  avatarUrl        String?
   role             UserRole   
   status           UserStatus @default(PENDING)
   
