@@ -7,6 +7,14 @@ import jwt from "jsonwebtoken";
 
 const prisma = new PrismaClient();
 
+const extractPublicIdFromUrl = (url) => {
+  if (!url) return null;
+  const parts = url.split("/");
+  const fileWithExtension = parts[parts.length - 1];
+  const publicId = fileWithExtension.split(".")[0];
+  return publicId;
+};
+
 export const generateAccessToken = async (user) => {
   return jwt.sign(
     {
@@ -263,6 +271,88 @@ export const refreshAccessToken = asyncHandler(async (req, res) => {
       );
   } catch (error) {
     throw new ApiError(401, error?.message || "Invalid refresh token");
+  }
+});
+
+export const updateAccount = asyncHandler(async (req, res) => {
+  const { fullName, email } = req.body;
+  const updateData = {};
+  let uploadedAvatar = null;
+
+  const currentUser = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { avatarUrl: true } 
+  });
+
+  const oldAvatarUrl = currentUser?.avatarUrl;
+
+  if (fullName) {
+    updateData.fullName = fullName;
+  }
+
+  if (email) {
+    const existingUser = await prisma.user.findUnique({
+      where: {
+        email_tenantId: {
+          email: email,
+          tenantId: req.user.tenantId,
+        },
+      },
+    });
+
+    if (existingUser && existingUser.id !== req.user.id) {
+      throw new ApiError(409, "Email already exists in your organization");
+    }
+    updateData.email = email;
+  }
+
+  if (req.file && req.file.path) {
+    uploadedAvatar = await uploadOnCloudinary(req.file.path);
+    if (!uploadedAvatar?.url) {
+      throw new ApiError(500, "Error while uploading new avatar to Cloudinary");
+    }
+    updateData.avatarUrl = uploadedAvatar.url;
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    throw new ApiError(400, "Please provide at least one field to update");
+  }
+
+  try {
+    const updatedUser = await prisma.user.update({
+      where: { id: req.user.id },
+      data: updateData,
+      select: {
+        id: true,
+        tenantId: true,
+        fullName: true,
+        email: true,
+        avatarUrl: true,
+        role: true,
+      },
+    });
+
+    if (uploadedAvatar && oldAvatarUrl) {
+      const oldPublicId = extractPublicIdFromUrl(oldAvatarUrl);
+      if (oldPublicId) {
+        deleteFromCloudinary(oldPublicId).catch((err) => 
+          console.error("Failed to delete old avatar:", err)
+        );
+      }
+    }
+
+    return res
+      .status(200)
+      .json(new ApiResponse(200, updatedUser, "Account updated successfully"));
+
+  } catch (error) {
+    if (uploadedAvatar?.url) {
+      const newPublicId = extractPublicIdFromUrl(uploadedAvatar.url);
+      if (newPublicId) {
+        await deleteFromCloudinary(newPublicId); 
+      }
+    }
+    throw new ApiError(500, "Failed to update account. Changes rolled back.");
   }
 });
 
