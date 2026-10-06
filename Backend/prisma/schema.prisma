@@ -103,6 +103,7 @@ model Tenant {
   subscriptionStatus SubscriptionStatus @default(ACTIVE)
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
+  tenantCode         String              @unique
   
   subscription       PlatformSubscription?
   

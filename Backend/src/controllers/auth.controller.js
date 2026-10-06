@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
@@ -59,9 +60,12 @@ export const registerTenant = asyncHandler(async (req, res) => {
 
   const passwordHash = await bcrypt.hash(password, 10);
 
+  const generatedTenantCode = crypto.randomBytes(4).toString("hex").toUpperCase();
+
   const newTenant = await prisma.tenant.create({
     data: {
       name: tenantName,
+      tenantCode: generatedTenantCode,
       businessType: businessType,
       subscription: {
         create: {
@@ -81,6 +85,7 @@ export const registerTenant = asyncHandler(async (req, res) => {
     select: {
       id: true,
       name: true,
+      tenantCode: true, 
       businessType: true,
       subscriptionStatus: true,
       users: {
