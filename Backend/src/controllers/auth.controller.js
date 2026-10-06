@@ -440,3 +440,130 @@ export const changePassword = asyncHandler (async(req,res)=>{
 
 })
 
+export const forgotPassword = asyncHandler(async (req, res) => {
+  const { email, tenantCode } = req.body;
+
+  if (!email || !tenantCode) {
+    throw new ApiError(400, "Email and Company Code are required");
+  }
+
+  const genericSuccessMessage = "If an account with this email and company code exists, a password reset link has been sent.";
+
+  const tenant = await prisma.tenant.findUnique({
+    where: { tenantCode },
+  });
+
+  if (!tenant) {
+    return res.status(200).json(new ApiResponse(200, null, genericSuccessMessage));
+  }
+
+  const user = await prisma.user.findUnique({
+    where: {
+      email_tenantId: {
+        email: email,
+        tenantId: tenant.id,
+      },
+    },
+  });
+
+  if (!user) {
+    return res.status(200).json(new ApiResponse(200, null, genericSuccessMessage));
+  }
+
+  const resetToken = crypto.randomBytes(32).toString("hex");
+
+  const hashedToken = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+
+  const tokenExpiry = new Date(Date.now() + 5 * 60 * 1000);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      forgotPasswordToken: hashedToken,
+      forgotPasswordExpiry: tokenExpiry,
+    },
+  });
+
+  const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+  const emailMessage = `You requested a password reset for your account.\n\nPlease click on the link below to reset your password. This link is valid for 15 minutes:\n\n${resetUrl}\n\nIf you did not request this, please ignore this email.`;
+
+  try {
+    await sendEmail({
+      email: user.email,
+      subject: "Password Reset Request",
+      message: emailMessage,
+    });
+
+    return res.status(200).json(new ApiResponse(200, null, genericSuccessMessage));
+  } catch (error) {
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        forgotPasswordToken: null,
+        forgotPasswordExpiry: null,
+      },
+    });
+
+    throw new ApiError(500, "Failed to send password reset email. Please try again later.");
+  }
+});
+
+export const resetPassword = asyncHandler(async (req, res) => {
+  const { token } = req.params; 
+  const { newPassword, confirmNewPassword } = req.body;
+
+  if (!newPassword || !confirmNewPassword) {
+    throw new ApiError(400, "Both password fields are required");
+  }
+
+  if (newPassword !== confirmNewPassword) {
+    throw new ApiError(400, "Passwords do not match");
+  }
+
+  const hashedToken = crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
+
+  const user = await prisma.user.findFirst({
+    where: {
+      forgotPasswordToken: hashedToken,
+      forgotPasswordExpiry: {
+        gt: new Date(),
+      },
+    },
+  });
+
+  if (!user) {
+    throw new ApiError(400, "Token is invalid or has expired");
+  }
+
+  const newPasswordHash = await bcrypt.hash(newPassword, 10);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      password: newPasswordHash,
+      forgotPasswordToken: null, 
+      forgotPasswordExpiry: null, 
+      refreshToken: null, 
+    },
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      tenantId: user.tenantId,
+      userId: user.id,
+      action: "PASSWORD_RESET_COMPLETED",
+      targetResource: "USER",
+    },
+  });
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Password reset successfully. You can now log in."));
+});
+
