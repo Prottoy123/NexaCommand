@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
@@ -59,9 +60,12 @@ export const registerTenant = asyncHandler(async (req, res) => {
 
   const passwordHash = await bcrypt.hash(password, 10);
 
+  const generatedTenantCode = crypto.randomBytes(4).toString("hex").toUpperCase();
+
   const newTenant = await prisma.tenant.create({
     data: {
       name: tenantName,
+      tenantCode: generatedTenantCode,
       businessType: businessType,
       subscription: {
         create: {
@@ -81,6 +85,7 @@ export const registerTenant = asyncHandler(async (req, res) => {
     select: {
       id: true,
       name: true,
+      tenantCode: true, 
       businessType: true,
       subscriptionStatus: true,
       users: {
@@ -355,4 +360,83 @@ export const updateAccount = asyncHandler(async (req, res) => {
     throw new ApiError(500, "Failed to update account. Changes rolled back.");
   }
 });
+
+export const changePassword = asyncHandler (async(req,res)=>{
+
+  const {currentPassword, newPassword, confirmnewPassword} = req.body
+
+  if (!currentPassword || !newPassword || !confirmnewPassword) {
+    throw new ApiError(
+      400,
+      "All fields are required"
+    );
+  }
+
+  if (newPassword !== confirmnewPassword) {
+    throw new ApiError(400, "New password and confirm password do not match");
+  }
+
+  if (currentPassword === newPassword) {
+    throw new ApiError(400, "New password cannot be the same as the old password");
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { password: true },
+  }); 
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
+  const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+  if (!isPasswordValid) {
+    throw new ApiError(400, "Invalid old password");
+  }
+
+  const newPasswordHash = await bcrypt.hash(newPassword, 10);
+
+    const updatedUser = await prisma.user.update({
+      where: { id: req.user.id },
+      data: { password: newPasswordHash, refreshToken: null},
+      select: {
+        id: true,
+        tenantId: true,
+        fullName: true,
+        email: true,
+        avatarUrl: true,
+        role: true,
+      },
+    });
+
+    if (!updatedUser) {
+      throw new ApiError(500, "Failed to update password");
+    }
+
+    const AuditLog = await prisma.auditLog.create({
+      data: {
+        tenantId: req.user.tenantId,
+        userId: req.user.id,
+        action: "PASSWORD_CHANGED",
+        resourceType: "USER",
+        resourceId: req.user.id,
+      },
+    }); 
+
+    if (!AuditLog) {
+      throw new ApiError(500, "Failed to create audit log");
+    }
+
+    const options = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "none",
+  };
+
+    return res
+    .status(200)
+    .clearCookie("accessToken", options)
+    .clearCookie("refreshToken", options)
+    .json(new ApiResponse(200, updatedUser, "Password changed successfully"));
+
+})
 
