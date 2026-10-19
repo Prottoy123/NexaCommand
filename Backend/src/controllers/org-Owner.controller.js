@@ -4,6 +4,7 @@ import crypto from "crypto";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
+import { stat } from "fs";
 
 const prisma = new PrismaClient();
 
@@ -188,4 +189,110 @@ export const acceptInvite = asyncHandler(async (req, res) => {
         new ApiResponse(200, updatedUser, "Your account has been activated successfully. You can now log in.")
     );
 });
+
+export const updateUserStatus = asyncHandler(async (req, res) => {
+    const { userId } = req.params;
+    const { status } = req.body;
+
+    if (!['ACTIVE', 'SUSPENDED'].includes(status)) {
+        throw new ApiError(400, "Invalid status. Allowed values are 'ACTIVE' or 'SUSPENDED'.");
+    }
+
+    if (userId === req.user.id) {
+        throw new ApiError(403, "Action denied. You cannot modify your own access status.");
+    }
+
+    const targetUser = await prisma.user.findFirst({
+        where: { 
+            id: userId,
+            tenantId: req.user.tenantId
+        }
+    });
+
+    if (!targetUser) {
+        throw new ApiError(404, "User not found or does not belong to your organization.");
+    }
+
+    //Hierarchy Protection - Prevent modifying other owners
+    if (['SUPER_ADMIN', 'ORG_OWNER'].includes(targetUser.role)) {
+        throw new ApiError(403, "Action denied. You cannot modify the status of an administrator or owner.");
+    }
+
+    if (targetUser.status === status) {
+        throw new ApiError(400, `User is already in '${status}' state.`);
+    }
+
+    if (targetUser.status === 'PENDING' && status === 'ACTIVE') {
+        throw new ApiError(400, "Action denied. A pending user must activate their account via the email invitation link.");
+    }
+
+    // Prepare dynamic update payload
+    const updateData = { status };
+    
+    // terminate the session if the user is being suspended
+    if (status === 'SUSPENDED') {
+        updateData.refreshToken = null;
+    }
+
+    // Database Mutation with Safe Projection
+    const updatedUser = await prisma.user.update({
+        where: { 
+            id: userId 
+        },
+        data: updateData,
+        select: {
+            id: true,
+            fullName: true,
+            email: true,
+            role: true,
+            status: true
+        }
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, updatedUser, "User status has been successfully updated.")
+    );
+});
+
+export const getBranchList = asyncHandler(async (req, res) => {
+    const tenantId = req.user.tenantId;
+
+    const branchList = await prisma.branch.findMany({
+        where: {
+            tenantId: tenantId
+        },
+        orderBy: {
+            createdAt: "desc"
+        },
+        select: {
+            id: true,
+            name: true,
+            location: true,
+            contactNumber: true,
+            manager: {
+                select: {
+                    id: true,
+                    fullName: true,
+                    email: true,
+                    role: true
+                }
+            },
+            _count: {
+                select: {
+                    staff: {
+                        where: {
+                            status: "ACTIVE"
+                        }
+                    }
+                }
+            }
+        }
+    });
+    
+    return res.status(200).json(
+        new ApiResponse(200, branchList, "Branches fetched successfully.")
+    );
+});
+
+
 
