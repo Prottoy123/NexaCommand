@@ -294,5 +294,157 @@ export const getBranchList = asyncHandler(async (req, res) => {
     );
 });
 
+export const assignManager = asyncHandler(async (req, res) => {
+    const { userId, branchId } = req.body;
 
+    if (!userId?.trim() || !branchId?.trim()) {
+        throw new ApiError(400, "User ID and Branch ID are required.");
+    }
 
+    // Concurrent Fetching with Relationship Expansion
+    const [existingUser, existingBranch] = await Promise.all([
+        prisma.user.findFirst({
+            where: { id: userId, tenantId: req.user.tenantId },
+            include: { managedBranch: true } 
+        }),
+        prisma.branch.findFirst({
+            where: { id: branchId, tenantId: req.user.tenantId }
+        })
+    ]);
+
+    if (!existingUser) {
+        throw new ApiError(404, "User not found or does not belong to your organization.");
+    }
+
+    if (!existingBranch) {
+        throw new ApiError(404, "Branch not found or does not belong to your organization.");
+    }
+
+    // Strict Rule-Based Gatekeepers
+    if (existingBranch.managerId !== null) {
+        throw new ApiError(409, "This branch already has a manager. Remove the current manager first.");
+    }
+
+    if (existingUser.status !== "ACTIVE") {
+        throw new ApiError(400, "User must be active to be assigned as a branch manager.");
+    }
+
+    if (['SUPER_ADMIN', 'ORG_OWNER'].includes(existingUser.role)) {
+        throw new ApiError(403, "Action denied. Owners or Admins cannot be assigned as branch managers.");
+    }
+
+    if (existingUser.managedBranch) {
+        throw new ApiError(409, "This user is already managing another branch.");
+    }
+
+    const transactionResult = await prisma.$transaction(async (prismaTx) => {
+        const updatedUser = await prismaTx.user.update({
+            where: { id: existingUser.id },
+            data: { 
+                role: "BRANCH_MANAGER",
+                branchId: existingBranch.id // Linking the user to the physical branch
+            },
+            select: {
+                id: true,
+                fullName: true,
+                email: true,
+                role: true,
+                status: true,
+                branchId: true
+            }
+        });
+
+        const updatedBranch = await prismaTx.branch.update({
+            where: { id: existingBranch.id },
+            data: { managerId: existingUser.id },
+            select: {
+                id: true,
+                name: true,
+                location: true,
+                contactNumber: true,
+                manager: {
+                    select: {
+                        id: true,
+                        fullName: true,
+                        email: true,
+                        role: true
+                    }
+                },
+                _count: {
+                    select: {
+                        staff: {
+                            where: { status: "ACTIVE" }
+                        }
+                    }
+                }
+            }
+        });
+
+        return { updatedUser, updatedBranch };
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, transactionResult, "Manager has been assigned successfully.")
+    );
+});
+
+export const removeManager = asyncHandler(async (req, res) => {
+    const { branchId } = req.body;
+
+    if (!branchId?.trim()) {
+        throw new ApiError(400, "Branch ID is required.");
+    }
+
+    // Fetch branch with its current manager
+    const existingBranch = await prisma.branch.findFirst({
+        where: { 
+            id: branchId, 
+            tenantId: req.user.tenantId 
+        }
+    });
+
+    if (!existingBranch) {
+        throw new ApiError(404, "Branch not found or does not belong to your organization.");
+    }
+
+    // Ensure the branch actually has a manager
+    if (existingBranch.managerId === null) {
+        throw new ApiError(400, "This branch currently does not have an active manager to remove.");
+    }
+
+    const transactionResult = await prisma.$transaction(async (prismaTx) => {
+        // Demote the current manager to STAFF 
+        // (They remain physically in the branch as a regular staff member)
+        const demotedUser = await prismaTx.user.update({
+            where: { id: existingBranch.managerId },
+            data: { role: "STAFF" },
+            select: {
+                id: true,
+                fullName: true,
+                email: true,
+                role: true,
+                status: true,
+                branchId: true
+            }
+        });
+
+        // Remove the manager link from the branch
+        const updatedBranch = await prismaTx.branch.update({
+            where: { id: existingBranch.id },
+            data: { managerId: null },
+            select: {
+                id: true,
+                name: true,
+                location: true,
+                contactNumber: true,
+                managerId: true
+            }
+        });
+
+        return { demotedUser, updatedBranch };
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, transactionResult, "Manager has been successfully removed and demoted to staff.")
+    );
+});
