@@ -5,6 +5,7 @@ import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import { stat } from "fs";
+import { calculatePayrollData } from '../service/payroll.service.js';
 
 const prisma = new PrismaClient();
 
@@ -448,3 +449,81 @@ export const removeManager = asyncHandler(async (req, res) => {
         new ApiResponse(200, transactionResult, "Manager has been successfully removed and demoted to staff.")
     );
 });
+
+export const payrollPreview = asyncHandler(async (req, res) => {
+    const tenantId = req.user.tenantId;
+
+    // Fetch and calculate payroll data purely in memory
+    const previewData = await calculatePayrollData(tenantId);
+
+    return res.status(200).json(
+        new ApiResponse(200, previewData, "Payroll preview generated successfully.")
+    );
+});
+
+export const generatePayroll = asyncHandler(async (req, res) => {
+    const tenantId = req.user.tenantId;
+    const today = new Date();
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1, 0, 0, 0, 0);
+    const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    // Step 1: Idempotency Check - Prevent double salary generation for the same month
+    const existingPayroll = await prisma.ledgerEvent.findFirst({
+        where: {
+            tenantId: tenantId,
+            eventType: "SALARY_PAID",
+            createdAt: {
+                gte: startOfMonth,
+                lte: endOfMonth
+            }
+        }
+    });
+
+    if (existingPayroll) {
+        throw new ApiError(409, "Payroll for this month has already been generated and recorded.");
+    }
+
+    // Step 2: Fetch the validated, real-time calculated data from the service
+    const payrollData = await calculatePayrollData(tenantId);
+
+    // Step 3: Prepare the batch transaction array
+    const transactionOperations = [];
+
+    for (const staff of payrollData.details) {
+        // Record the salary disbursement in the ledger[cite: 8]
+        transactionOperations.push(
+            prisma.ledgerEvent.create({
+                data: {
+                    tenantId: tenantId,
+                    transactionId: `PR-${Date.now()}-${staff.userId.substring(0, 5)}`,
+                    eventType: "SALARY_PAID",
+                    debitAccount: "COMPANY_ACCOUNT",
+                    creditAccount: "STAFF_ACCOUNT",
+                    amount: staff.netPayable,
+                    referenceId: staff.userId,
+                    referenceType: "PAYROLL"
+                }
+            })
+        );
+
+        // Reset the staff's earned commission back to 0 for the next month[cite: 8]
+        transactionOperations.push(
+            prisma.user.update({
+                where: { id: staff.userId },
+                data: { earnedCommission: 0 }
+            })
+        );
+    }
+
+    await prisma.$transaction(transactionOperations);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            processedMonth: payrollData.month,
+            totalStaffProcessed: payrollData.totalStaff,
+            totalAmountDisbursed: payrollData.totalCompanyPayroll
+        }, "Payroll has been finalized and recorded in the ledger successfully.")
+    );
+});
+
+
