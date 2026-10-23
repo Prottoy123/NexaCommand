@@ -526,4 +526,88 @@ export const generatePayroll = asyncHandler(async (req, res) => {
     );
 });
 
+export const getStaffList = asyncHandler(async(req, res) => {
+    const tenantId = req.user.tenantId;
+    const { limit, page } = req.query;
+
+    const pageNumber = parseInt(page) || 1;
+    const limitNumber = parseInt(limit) || 10;
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const today = new Date();
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1, 0, 0, 0, 0);
+    const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    const [totalStaff, staffList] = await Promise.all([
+        prisma.user.count({
+            where: {
+                tenantId: tenantId,
+                role: { in: ['STAFF', 'BRANCH_MANAGER'] }
+            }
+        }),
+        prisma.user.findMany({
+            where: {
+                tenantId: tenantId,
+                role: { in: ['STAFF', 'BRANCH_MANAGER'] }
+            },
+            skip: skip,
+            take: limitNumber,
+            orderBy: {
+                createdAt: "desc" 
+            },
+            select: {
+                id: true,
+                fullName: true,
+                email: true,
+                role: true,
+                status: true,
+                branchId: true,
+                earnedCommission: true, 
+                branch: {
+                    select: {
+                        name: true
+                    }
+                },
+                _count: {
+                    select: {
+                        sales: {
+                            where: {
+                                status: "ACTIVE",
+                                commissionEarned: true,
+                                createdAt: {
+                                    gte: startOfMonth,
+                                    lte: endOfMonth
+                                }
+                            }
+                        },
+                        ewaRequests: {
+                            where: {
+                                status: "APPROVED",
+                                createdAt: {
+                                    gte: startOfMonth,
+                                    lte: endOfMonth
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    ]);
+
+    const totalPages = Math.ceil(totalStaff / limitNumber);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            staffs: staffList,
+            meta: {
+                totalRecords: totalStaff,
+                currentPage: pageNumber,
+                totalPages: totalPages,
+                limit: limitNumber
+            }
+        }, "Staff directory fetched successfully.")
+    );
+});
+
 
