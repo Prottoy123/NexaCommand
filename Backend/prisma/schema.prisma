@@ -162,7 +162,10 @@ model User {
   id               String     @id @default(uuid())
   tenantId         String
   tenant           Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  
+  staffId          String?    @unique 
+
+  googleId         String?    @unique
+
   branchId         String?
   branch           Branch?    @relation("BranchStaff", fields: [branchId], references: [id])
   managedBranch    Branch?    @relation("BranchManager")
@@ -179,7 +182,7 @@ model User {
   refreshToken     String?
 
   forgotPasswordToken  String?
-forgotPasswordExpiry DateTime?
+  forgotPasswordExpiry DateTime?
   
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
@@ -189,7 +192,7 @@ forgotPasswordExpiry DateTime?
   approvedEwas     EwaRequest[] @relation("EwaApprover")
   auditLogs        AuditLog[]   @relation("UserAudit")
 
-  @@unique([email, tenantId]) // [FIXED] Composite Unique
+  @@unique([email, tenantId]) // Composite Unique for Multi-tenant notification isolation
   @@map("users")
 }
 
