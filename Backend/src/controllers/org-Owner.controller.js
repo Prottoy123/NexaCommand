@@ -50,145 +50,209 @@ export const createBranch = asyncHandler(async (req, res) => {
 });
 
 export const addStaff = asyncHandler(async (req, res) => {
-    const { fullName, email, role, branchId } = req.body;
-    const tenantId = req.user.tenantId;
+  const { fullName, email, baseSalary } = req.body;
+  const tenantId = req.user.tenantId;
 
-    // Step 1: Basic validation for required fields
-    if (!fullName?.trim() || !email?.trim()) {
-        throw new ApiError(400, "Full name and email are required.");
-    }
+  if (!fullName?.trim() || !email?.trim() || baseSalary === undefined) {
+    throw new ApiError(400, "Full name, email, and base salary are required.");
+  }
 
-    // Step 2: Strict role checking
-    if (!['STAFF', 'BRANCH_MANAGER'].includes(role)) {
-        throw new ApiError(403, "Invalid role. You can only assign STAFF or BRANCH_MANAGER roles.");
-    }
+  const sanitizedEmail = email.trim().toLowerCase();
+  const salary = Number(baseSalary);
 
-    // Step 3: Cross-tenant branch validation
-    if (branchId) {
-        const existingBranch = await prisma.branch.findFirst({
-            where: { id: branchId, tenantId }
-        });
+  if (isNaN(salary) || salary < 0) {
+    throw new ApiError(400, "Base salary must be a valid positive number.");
+  }
 
-        if (!existingBranch) {
-            throw new ApiError(404, "Branch not found or does not belong to your organization.");
-        }
-    }
+  //Composite Unique Check (Same email cannot be added twice in the SAME company)
+  const existingUser = await prisma.user.findUnique({
+    where: {
+      email_tenantId: {
+        email: sanitizedEmail,
+        tenantId: tenantId,
+      },
+    },
+  });
 
-    // Step 4: Composite email duplication check
-    const sanitizedEmail = email.trim().toLowerCase();
-    const existingUser = await prisma.user.findFirst({
-        where: { tenantId, email: sanitizedEmail }
+  if (existingUser) {
+    throw new ApiError(409, "A staff member with this email already exists in your organization.");
+  }
+
+  //Tenant Details & Prefix Extraction for Staff ID
+  const tenantDetails = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { name: true, tenantCode: true },
+  });
+
+  if (!tenantDetails) {
+    throw new ApiError(404, "Organization not found.");
+  }
+
+  // Generate Globally Unique Staff ID -> Format: [First 4 chars of tenantCode]-[5 Random Hex chars] (e.g., A3F9-8B2C1)
+  const tenantPrefix = tenantDetails.tenantCode.substring(0, 4).toUpperCase();
+  const randomDigits = crypto.randomBytes(3).toString("hex").toUpperCase().substring(0, 5);
+  const generatedStaffId = `${tenantPrefix}-${randomDigits}`;
+
+  // High-Entropy Temporary Password Generation (8 Characters)
+  const tempPasswordPlain = crypto.randomBytes(4).toString("hex"); // ইমেইলে পাঠানোর জন্য Plain Text
+  const hashedTempPassword = await bcrypt.hash(tempPasswordPlain, 10); // ডেটাবেসে রাখার জন্য Hashed
+
+  // Database Insertion (Status remains PENDING until they change the temp password)
+  const newStaff = await prisma.user.create({
+    data: {
+      fullName: fullName.trim(),
+      email: sanitizedEmail,
+      staffId: generatedStaffId,
+      password: hashedTempPassword,
+      role: "STAFF",
+      baseSalary: salary,
+      tenantId: tenantId,
+      status: "PENDING",
+    },
+    select: {
+      id: true,
+      staffId: true,
+      fullName: true,
+      email: true,
+      role: true,
+      baseSalary: true,
+      status: true,
+    },
+  });
+
+  // Dispatch Email with Staff ID & Temporary Password
+  const activationUrl = `${process.env.FRONTEND_URL}/activate-account?staffId=${generatedStaffId}`;
+  const emailMessage = `Hello ${newStaff.fullName},
+
+You have been invited to join ${tenantDetails.name} on NexaCommand.
+
+Here are your official login credentials:
+-----------------------------------------
+Official Staff ID : ${generatedStaffId}
+Temporary Password: ${tempPasswordPlain}
+-----------------------------------------
+
+IMPORTANT: Your account is currently in PENDING status. To activate your account and set your own permanent password, please visit the link below and enter your Staff ID and Temporary Password:
+
+${activationUrl}
+
+Please keep your Staff ID safe, as you will use this ID (not your email) for all future logins.`;
+
+  try {
+    await sendEmail({
+      email: sanitizedEmail,
+      subject: `[Action Required] Your Official Credentials for ${tenantDetails.name}`,
+      message: emailMessage,
     });
+  } catch (error) {
+    await prisma.user.delete({ where: { id: newStaff.id } });
+    throw new ApiError(500, "Failed to send invitation email. Staff creation rolled back.");
+  }
 
-    if (existingUser) {
-        throw new ApiError(409, "A user with this email already exists in your organization.");
-    } 
+  await prisma.auditLog.create({
+    data: {
+      tenantId: tenantId,
+      userId: req.user.id, 
+      action: `PROVISIONED_STAFF_${generatedStaffId}`,
+      targetResource: "USER",
+    },
+  });
 
-    // Step 5: Secure invitation logic with dummy password
-    // The password field is mandatory in the schema, so we generate a random hash
-    const dummyPassword = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 10);
-    
-    // Generate a secure invite token
-    const inviteToken = crypto.randomBytes(32).toString("hex");
-    const hashedInviteToken = crypto.createHash('sha256').update(inviteToken).digest('hex');
-    const tokenExpiry = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48 hours expiry
-
-    // Step 6: Database insertion
-    const user = await prisma.user.create({
-        data: {
-            fullName: fullName.trim(),
-            email: sanitizedEmail,
-            password: dummyPassword, 
-            branchId: branchId || null,
-            tenantId,
-            status: "PENDING",
-            forgotPasswordToken: hashedInviteToken,
-            forgotPasswordExpiry: tokenExpiry
-        },
-        select: {
-            id: true,
-            fullName: true,
-            email: true,
-            role: true,
-            status: true,
-            branchId: true
-        }
-    });
-
-    // Step 7: Fire and forget email dispatch[cite: 2]
-    const inviteUrl = `${process.env.FRONTEND_URL}/accept-invite?token=${inviteToken}`;
-    const emailMessage = `
-        Hello ${user.fullName}, 
-        
-        You have been invited to join the platform. 
-        Please click the link below to set up your password and activate your account:
-        ${inviteUrl}
-        
-        This link will expire in 48 hours.
-    `;
-
-    try {
-        await sendEmail(sanitizedEmail, "Welcome to the system - Activate your account", emailMessage);
-    } catch (error) {
-        console.error("Invitation email sending failed:", error);
-    }
-
-    return res.status(201).json(
-        new ApiResponse(201, user, "Staff has been added successfully and an invitation link has been sent.")
-    );
+  return res.status(201).json(
+    new ApiResponse(
+      201,
+      newStaff,
+      "Staff provisioned successfully. Official Staff ID and Temporary Password sent via email."
+    )
+  );
 });
 
 export const acceptInvite = asyncHandler(async (req, res) => {
-    const { token, newPassword } = req.body;
+  const { staffId, tempPassword, newPassword, confirmNewPassword } = req.body;
 
-    if (!token?.trim() || !newPassword?.trim()) {
-        throw new ApiError(400, "Invitation token and new password are required.");
-    }
+  if (!staffId?.trim() || !tempPassword?.trim() || !newPassword?.trim() || !confirmNewPassword?.trim()) {
+    throw new ApiError(400, "Staff ID, temporary password, and new password fields are required.");
+  }
 
-    if (newPassword.trim().length < 6) {
-        throw new ApiError(400, "New password must be at least 6 characters long.");
-    }
+  if (newPassword !== confirmNewPassword) {
+    throw new ApiError(400, "New password and confirm password do not match.");
+  }
 
-    const hashedToken = crypto.createHash("sha256").update(token.trim()).digest("hex");
+  if (newPassword.trim().length < 6) {
+    throw new ApiError(400, "New password must be at least 6 characters long.");
+  }
 
-    // Find the pending user with a valid, non-expired token
-    const user = await prisma.user.findFirst({
-        where: {
-            forgotPasswordToken: hashedToken,
-            forgotPasswordExpiry: { gt: new Date() },
-            status: "PENDING"
-        }
-    });
+  if (tempPassword.trim() === newPassword.trim()) {
+    throw new ApiError(400, "New password cannot be the same as your temporary password.");
+  }
 
-    if (!user) {
-        throw new ApiError(400, "Invalid or expired invitation token.");
-    }
+  // Global Lookup using Unique Staff ID
+  const user = await prisma.user.findUnique({
+    where: {
+      staffId: staffId.trim().toUpperCase(),
+    },
+    include: {
+      tenant: {
+        select: { name: true },
+      },
+    },
+  });
 
-    const hashedNewPassword = await bcrypt.hash(newPassword.trim(), 10);
-    
-    //Update user state, clear tokens, and project only safe fields
-    const updatedUser = await prisma.user.update({
-        where: {
-            id: user.id
-        },
-        data: {
-            password: hashedNewPassword,
-            status: "ACTIVE",
-            forgotPasswordToken: null,
-            forgotPasswordExpiry: null
-        },
-        select: {
-            id: true,
-            fullName: true,
-            email: true,
-            role: true,
-            status: true
-        }
-    });
+  if (!user) {
+    throw new ApiError(404, "Invalid Staff ID. No user found.");
+  }
 
-    return res.status(200).json(
-        new ApiResponse(200, updatedUser, "Your account has been activated successfully. You can now log in.")
-    );
+  // Check Account State
+  if (user.status === "ACTIVE") {
+    throw new ApiError(400, "This account is already activated. Please go to the login page.");
+  }
+
+  if (user.status === "SUSPENDED") {
+    throw new ApiError(403, "This account has been suspended by the organization.");
+  }
+
+  //Verify the Temporary Password
+  const isTempPasswordValid = await bcrypt.compare(tempPassword.trim(), user.password);
+  if (!isTempPasswordValid) {
+    throw new ApiError(401, "Invalid temporary password. Please check your invitation email.");
+  }
+
+  //Hash Permanent Password & Activate Account
+  const hashedNewPassword = await bcrypt.hash(newPassword.trim(), 10);
+
+  const activatedUser = await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      password: hashedNewPassword,
+      status: "ACTIVE", 
+    },
+    select: {
+      id: true,
+      staffId: true,
+      fullName: true,
+      email: true,
+      role: true,
+      status: true,
+    },
+  });
+
+  // Audit Log for Activation
+  await prisma.auditLog.create({
+    data: {
+      tenantId: user.tenantId,
+      userId: user.id,
+      action: "STAFF_ACCOUNT_ACTIVATED",
+      targetResource: "USER",
+    },
+  });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      { user: activatedUser, workspace: user.tenant.name },
+      "Account activated successfully! You can now log in using your Staff ID and new password."
+    )
+  );
 });
 
 export const updateUserStatus = asyncHandler(async (req, res) => {
@@ -243,6 +307,7 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
         data: updateData,
         select: {
             id: true,
+            staffId: true,
             fullName: true,
             email: true,
             role: true,
@@ -273,6 +338,7 @@ export const getBranchList = asyncHandler(async (req, res) => {
             manager: {
                 select: {
                     id: true,
+                    staffId: true,
                     fullName: true,
                     email: true,
                     role: true
@@ -342,11 +408,11 @@ export const assignManager = asyncHandler(async (req, res) => {
         const updatedUser = await prismaTx.user.update({
             where: { id: existingUser.id },
             data: { 
-                role: "BRANCH_MANAGER",
-                branchId: existingBranch.id // Linking the user to the physical branch
+                role: "BRANCH_MANAGER"
             },
             select: {
                 id: true,
+                staffId: true,
                 fullName: true,
                 email: true,
                 role: true,
@@ -366,6 +432,7 @@ export const assignManager = asyncHandler(async (req, res) => {
                 manager: {
                     select: {
                         id: true,
+                        staffId: true,
                         fullName: true,
                         email: true,
                         role: true
@@ -421,6 +488,7 @@ export const removeManager = asyncHandler(async (req, res) => {
             data: { role: "STAFF" },
             select: {
                 id: true,
+                staffId: true,
                 fullName: true,
                 email: true,
                 role: true,
@@ -528,28 +596,35 @@ export const generatePayroll = asyncHandler(async (req, res) => {
 
 export const getStaffList = asyncHandler(async(req, res) => {
     const tenantId = req.user.tenantId;
-    const { limit, page } = req.query;
+    const { limit, page, search } = req.query;
 
-    const pageNumber = parseInt(page) || 1;
-    const limitNumber = parseInt(limit) || 10;
+    const pageNumber = Math.max(1, parseInt(page) || 1);
+    const limitNumber = Math.max(1, parseInt(limit) || 10);
     const skip = (pageNumber - 1) * limitNumber;
 
     const today = new Date();
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1, 0, 0, 0, 0);
     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59, 999);
 
+    const where = {
+        tenantId: tenantId,
+        role: { in: ['STAFF', 'BRANCH_MANAGER'] }
+    };
+
+    if (search) {
+        where.OR = [
+            { fullName: { contains: search, mode: 'insensitive' } },
+            { email: { contains: search, mode: 'insensitive' } },
+            { staffId: { contains: search, mode: 'insensitive' } }
+        ];
+    }
+
     const [totalStaff, staffList] = await Promise.all([
         prisma.user.count({
-            where: {
-                tenantId: tenantId,
-                role: { in: ['STAFF', 'BRANCH_MANAGER'] }
-            }
+            where: where
         }),
         prisma.user.findMany({
-            where: {
-                tenantId: tenantId,
-                role: { in: ['STAFF', 'BRANCH_MANAGER'] }
-            },
+            where: where,
             skip: skip,
             take: limitNumber,
             orderBy: {
@@ -557,6 +632,7 @@ export const getStaffList = asyncHandler(async(req, res) => {
             },
             select: {
                 id: true,
+                staffId: true,
                 fullName: true,
                 email: true,
                 role: true,
@@ -609,5 +685,8 @@ export const getStaffList = asyncHandler(async(req, res) => {
         }, "Staff directory fetched successfully.")
     );
 });
+
+
+
 
 
