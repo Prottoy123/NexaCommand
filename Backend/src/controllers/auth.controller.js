@@ -119,28 +119,60 @@ export const registerTenant = asyncHandler(async (req, res) => {
 });
 
 export const loginUser = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
+  const { identifier, email, staffId, password } = req.body;
+  const loginInput = (identifier || email || staffId)?.trim();
 
-  if (!email || !password) {
-    throw new ApiError(400, "Please provide email and password");
+  if (!loginInput || !password) {
+    throw new ApiError(400, "Please provide your Email or Staff ID and password");
   }
 
-  const user = await prisma.user.findFirst({
-    where: { email },
-  });
+  let user;
 
-  if (!user) {
-    throw new ApiError(404, "User does not exist");
+  if (loginInput.includes("@")) {
+    user = await prisma.user.findFirst({
+      where: {
+        email: loginInput.toLowerCase(),
+        role: { in: ["ORG_OWNER", "SUPER_ADMIN"] },
+      },
+    });
+
+    if (!user) {
+      throw new ApiError(
+        401,
+        "Invalid credentials. Note: Staff members must log in using their Official Staff ID, not email."
+      );
+    }
+  } else {
+    // Staff / Branch Manager Login via Globally Unique Staff ID
+    user = await prisma.user.findUnique({
+      where: {
+        staffId: loginInput.toUpperCase(),
+      },
+    });
+
+    if (!user) {
+      throw new ApiError(401, "Invalid Staff ID or password");
+    }
   }
 
-  if (user.status !== "ACTIVE") {
-    throw new ApiError(403, "User account is suspended or pending");
+  if (user.status === "PENDING") {
+    throw new ApiError(
+      403,
+      "Your account is not activated yet. Please check your invitation email to activate your account."
+    );
+  }
+
+  if (user.status === "SUSPENDED") {
+    throw new ApiError(
+      403,
+      "Your account has been suspended. Please contact your organization administrator."
+    );
   }
 
   const isPasswordValid = await bcrypt.compare(password, user.password);
 
   if (!isPasswordValid) {
-    throw new ApiError(401, "Invalid email or password");
+    throw new ApiError(401, "Invalid credentials");
   }
 
   const accessToken = await generateAccessToken(user);
@@ -154,22 +186,26 @@ export const loginUser = asyncHandler(async (req, res) => {
   const loggedInUser = {
     id: user.id,
     tenantId: user.tenantId,
+    branchId: user.branchId, 
+    staffId: user.staffId,   
     fullName: user.fullName,
     email: user.email,
+    avatarUrl: user.avatarUrl,
     role: user.role,
     status: user.status,
   };
 
-  const options = {
+  const isProduction = process.env.NODE_ENV === "production";
+  const cookieOptions = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax", 
   };
 
   return res
     .status(200)
-    .cookie("accessToken", accessToken, options)
-    .cookie("refreshToken", refreshToken, options)
+    .cookie("accessToken", accessToken, cookieOptions)
+    .cookie("refreshToken", refreshToken, cookieOptions)
     .json(
       new ApiResponse(
         200,
@@ -178,8 +214,8 @@ export const loginUser = asyncHandler(async (req, res) => {
           accessToken,
           refreshToken,
         },
-        "User logged in successfully",
-      ),
+        "User logged in successfully"
+      )
     );
 });
 
@@ -361,19 +397,20 @@ export const updateAccount = asyncHandler(async (req, res) => {
   }
 });
 
-export const changePassword = asyncHandler (async(req,res)=>{
+export const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword, confirmNewPassword, confirmnewPassword } = req.body;
+  const confirmedPass = confirmNewPassword || confirmnewPassword;
 
-  const {currentPassword, newPassword, confirmnewPassword} = req.body
-
-  if (!currentPassword || !newPassword || !confirmnewPassword) {
-    throw new ApiError(
-      400,
-      "All fields are required"
-    );
+  if (!currentPassword || !newPassword || !confirmedPass) {
+    throw new ApiError(400, "All fields are required");
   }
 
-  if (newPassword !== confirmnewPassword) {
+  if (newPassword !== confirmedPass) {
     throw new ApiError(400, "New password and confirm password do not match");
+  }
+
+  if (newPassword.trim().length < 6) {
+    throw new ApiError(400, "New password must be at least 6 characters long");
   }
 
   if (currentPassword === newPassword) {
@@ -383,101 +420,101 @@ export const changePassword = asyncHandler (async(req,res)=>{
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
     select: { password: true },
-  }); 
+  });
+
   if (!user) {
     throw new ApiError(404, "User not found");
   }
 
   const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
   if (!isPasswordValid) {
-    throw new ApiError(400, "Invalid old password");
+    throw new ApiError(400, "Invalid current password");
   }
 
-  const newPasswordHash = await bcrypt.hash(newPassword, 10);
+  const newPasswordHash = await bcrypt.hash(newPassword.trim(), 10);
 
-    const updatedUser = await prisma.user.update({
-      where: { id: req.user.id },
-      data: { password: newPasswordHash, refreshToken: null},
-      select: {
-        id: true,
-        tenantId: true,
-        fullName: true,
-        email: true,
-        avatarUrl: true,
-        role: true,
-      },
-    });
-
-    if (!updatedUser) {
-      throw new ApiError(500, "Failed to update password");
-    }
-
-    const AuditLog = await prisma.auditLog.create({
-      data: {
-        tenantId: req.user.tenantId,
-        userId: req.user.id,
-        action: "PASSWORD_CHANGED",
-        resourceType: "USER",
-        resourceId: req.user.id,
-      },
-    }); 
-
-    if (!AuditLog) {
-      throw new ApiError(500, "Failed to create audit log");
-    }
-
-    const options = {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
-  };
-
-    return res
-    .status(200)
-    .clearCookie("accessToken", options)
-    .clearCookie("refreshToken", options)
-    .json(new ApiResponse(200, updatedUser, "Password changed successfully"));
-
-})
-
-export const forgotPassword = asyncHandler(async (req, res) => {
-  const { email, tenantCode } = req.body;
-
-  if (!email || !tenantCode) {
-    throw new ApiError(400, "Email and Company Code are required");
-  }
-
-  const genericSuccessMessage = "If an account with this email and company code exists, a password reset link has been sent.";
-
-  const tenant = await prisma.tenant.findUnique({
-    where: { tenantCode },
-  });
-
-  if (!tenant) {
-    return res.status(200).json(new ApiResponse(200, null, genericSuccessMessage));
-  }
-
-  const user = await prisma.user.findUnique({
-    where: {
-      email_tenantId: {
-        email: email,
-        tenantId: tenant.id,
-      },
+  const updatedUser = await prisma.user.update({
+    where: { id: req.user.id },
+    data: {
+      password: newPasswordHash,
+      refreshToken: null, 
+    },
+    select: {
+      id: true,
+      tenantId: true,
+      staffId: true,
+      fullName: true,
+      email: true,
+      avatarUrl: true,
+      role: true,
     },
   });
 
-  if (!user) {
+  await prisma.auditLog.create({
+    data: {
+      tenantId: req.user.tenantId,
+      userId: req.user.id,
+      action: "PASSWORD_CHANGED",
+      targetResource: "USER",
+    },
+  });
+
+  const isProduction = process.env.NODE_ENV === "production";
+  const cookieOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+  };
+
+  return res
+    .status(200)
+    .clearCookie("accessToken", cookieOptions)
+    .clearCookie("refreshToken", cookieOptions)
+    .json(
+      new ApiResponse(200, updatedUser, "Password changed successfully. Please log in again.")
+    );
+});
+
+export const forgotPassword = asyncHandler(async (req, res) => {
+  const { identifier, email, staffId } = req.body;
+  const recoveryInput = (identifier || email || staffId)?.trim();
+
+  if (!recoveryInput) {
+    throw new ApiError(400, "Please provide your Email (for Owners) or Official Staff ID (for Staff)");
+  }
+
+  const genericSuccessMessage =
+    "If a valid account matches this identifier, a password reset link has been sent to the registered email address.";
+
+  let user;
+
+  if (recoveryInput.includes("@")) {
+    user = await prisma.user.findFirst({
+      where: {
+        email: recoveryInput.toLowerCase(),
+        role: { in: ["ORG_OWNER", "SUPER_ADMIN"] },
+      },
+    });
+  } else {
+    // Staff / Branch Manager lookup by Globally Unique Staff ID
+    user = await prisma.user.findUnique({
+      where: {
+        staffId: recoveryInput.toUpperCase(),
+      },
+    });
+  }
+
+  if (!user || user.status === "SUSPENDED") {
     return res.status(200).json(new ApiResponse(200, null, genericSuccessMessage));
   }
 
   const resetToken = crypto.randomBytes(32).toString("hex");
-
   const hashedToken = crypto
     .createHash("sha256")
     .update(resetToken)
     .digest("hex");
 
-  const tokenExpiry = new Date(Date.now() + 5 * 60 * 1000);
+  const tokenExpiry = new Date(Date.now() + 15 * 60 * 1000);
 
   await prisma.user.update({
     where: { id: user.id },
@@ -488,12 +525,14 @@ export const forgotPassword = asyncHandler(async (req, res) => {
   });
 
   const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
-  const emailMessage = `You requested a password reset for your account.\n\nPlease click on the link below to reset your password. This link is valid for 15 minutes:\n\n${resetUrl}\n\nIf you did not request this, please ignore this email.`;
+  const emailMessage = `Hello ${user.fullName},\n\nYou requested a password reset for your NexaCommand account ${
+    user.staffId ? `(Staff ID: ${user.staffId})` : ""
+  }.\n\nPlease click on the link below to reset your password. This link is valid for 15 minutes:\n\n${resetUrl}\n\nIf you did not request this, please ignore this email.`;
 
   try {
     await sendEmail({
-      email: user.email,
-      subject: "Password Reset Request",
+      email: user.email, 
+      subject: "NexaCommand - Password Reset Request",
       message: emailMessage,
     });
 
@@ -512,8 +551,12 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 });
 
 export const resetPassword = asyncHandler(async (req, res) => {
-  const { token } = req.params; 
+  const { token } = req.params;
   const { newPassword, confirmNewPassword } = req.body;
+
+  if (!token?.trim()) {
+    throw new ApiError(400, "Reset token is missing");
+  }
 
   if (!newPassword || !confirmNewPassword) {
     throw new ApiError(400, "Both password fields are required");
@@ -523,9 +566,13 @@ export const resetPassword = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Passwords do not match");
   }
 
+  if (newPassword.trim().length < 6) {
+    throw new ApiError(400, "New password must be at least 6 characters long");
+  }
+
   const hashedToken = crypto
     .createHash("sha256")
-    .update(token)
+    .update(token.trim())
     .digest("hex");
 
   const user = await prisma.user.findFirst({
@@ -541,15 +588,20 @@ export const resetPassword = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Token is invalid or has expired");
   }
 
-  const newPasswordHash = await bcrypt.hash(newPassword, 10);
+  if (user.status === "SUSPENDED") {
+    throw new ApiError(403, "Your account is suspended. Cannot reset password.");
+  }
+
+  const newPasswordHash = await bcrypt.hash(newPassword.trim(), 10);
 
   await prisma.user.update({
     where: { id: user.id },
     data: {
       password: newPasswordHash,
-      forgotPasswordToken: null, 
-      forgotPasswordExpiry: null, 
-      refreshToken: null, 
+      status: user.status === "PENDING" ? "ACTIVE" : user.status,
+      forgotPasswordToken: null,
+      forgotPasswordExpiry: null,
+      refreshToken: null,
     },
   });
 
