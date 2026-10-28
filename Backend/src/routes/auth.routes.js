@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import { verifyJWT } from "../middleware/userAuth.middleware.js";
 import { upload } from "../middleware/multer.middleware.js";
-import { changePassword, forgotPassword, getCurrentUser, loginUser, logoutUser, refreshAccessToken, registerTenant, resetPassword, updateAccount } from "../controllers/auth.controller.js";
+import { changePassword, forgotPassword, getCurrentUser, googleLogin, googleRegisterTenant, loginUser, logoutUser, refreshAccessToken, registerTenant, resetPassword, updateAccount } from "../controllers/auth.controller.js";
 
 const router = Router();
 
@@ -41,5 +41,9 @@ router.route("/update-account").patch(
   upload.single("avatar"), 
   updateAccount
 );
+
+// 7. Google OAuth Routes (Strictly for ORG_OWNER)
+router.route("/google-register-tenant").post(googleRegisterTenant);
+router.route("/google-login").post(googleLogin);
 
 export default router;

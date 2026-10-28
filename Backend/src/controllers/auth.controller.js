@@ -5,6 +5,7 @@ import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import jwt from "jsonwebtoken";
+import { verifyGoogleIdToken } from "../config/google.config.js";
 
 const prisma = new PrismaClient();
 
@@ -617,5 +618,218 @@ export const resetPassword = asyncHandler(async (req, res) => {
   return res
     .status(200)
     .json(new ApiResponse(200, null, "Password reset successfully. You can now log in."));
+});
+
+//Google Register & Login 
+
+export const googleRegisterTenant = asyncHandler(async (req, res) => {
+  const { idToken, tenantName, businessType } = req.body;
+
+  if (!idToken || !tenantName?.trim() || !businessType) {
+    throw new ApiError(
+      400,
+      "Google token, organization name, and business type are required."
+    );
+  }
+
+  const validBusinessTypes = ["RETAIL", "CORPORATE", "AGENCY"];
+  if (!validBusinessTypes.includes(businessType)) {
+    throw new ApiError(400, "Invalid business type. Must be RETAIL, CORPORATE, or AGENCY.");
+  }
+
+  // Verify Google Token via Config Utility
+  const { googleId, email, fullName, avatarUrl } = await verifyGoogleIdToken(idToken);
+
+  const existingUser = await prisma.user.findFirst({
+    where: {
+      OR: [{ email: email }, { googleId: googleId }],
+    },
+  });
+
+  if (existingUser) {
+    throw new ApiError(
+      409,
+      "An account with this Google email already exists. Please sign in instead."
+    );
+  }
+
+  // Cryptographic Dummy Password & Workspace Code Generation
+  const dummyPasswordHash = await bcrypt.hash(
+    crypto.randomBytes(32).toString("hex"),
+    10
+  );
+  const generatedTenantCode = crypto.randomBytes(4).toString("hex").toUpperCase();
+
+  // Atomic Tenant + Subscription + Owner Creation
+  const newTenant = await prisma.tenant.create({
+    data: {
+      name: tenantName.trim(),
+      tenantCode: generatedTenantCode,
+      businessType: businessType,
+      subscription: {
+        create: {
+          plan: "FREE",
+        },
+      },
+      users: {
+        create: {
+          fullName: fullName,
+          email: email,
+          googleId: googleId,
+          avatarUrl: avatarUrl,
+          password: dummyPasswordHash,
+          role: "ORG_OWNER", // Zero-Trust Owner Role
+          status: "ACTIVE",
+        },
+      },
+    },
+    include: {
+      users: true,
+    },
+  });
+
+  const ownerUser = newTenant.users[0];
+
+  // Auto-Login (Generate JWT Tokens immediately after Google Sign-Up)
+  const accessToken = await generateAccessToken(ownerUser);
+  const refreshToken = await generateRefreshToken(ownerUser);
+
+  await prisma.user.update({
+    where: { id: ownerUser.id },
+    data: { refreshToken: refreshToken },
+  });
+
+  // Step 7: Audit Log
+  await prisma.auditLog.create({
+    data: {
+      tenantId: newTenant.id,
+      userId: ownerUser.id,
+      action: "TENANT_REGISTERED_VIA_GOOGLE",
+      targetResource: "PLATFORM",
+    },
+  });
+
+  const isProduction = process.env.NODE_ENV === "production";
+  const cookieOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+  };
+
+  const responsePayload = {
+    tenant: {
+      id: newTenant.id,
+      name: newTenant.name,
+      tenantCode: newTenant.tenantCode,
+      businessType: newTenant.businessType,
+    },
+    user: {
+      id: ownerUser.id,
+      tenantId: ownerUser.tenantId,
+      fullName: ownerUser.fullName,
+      email: ownerUser.email,
+      avatarUrl: ownerUser.avatarUrl,
+      role: ownerUser.role,
+      status: ownerUser.status,
+    },
+    accessToken,
+    refreshToken,
+  };
+
+  return res
+    .status(201)
+    .cookie("accessToken", accessToken, cookieOptions)
+    .cookie("refreshToken", refreshToken, cookieOptions)
+    .json(
+      new ApiResponse(
+        201,
+        responsePayload,
+        "Organization registered and logged in successfully via Google"
+      )
+    );
+});
+
+export const googleLogin = asyncHandler(async (req, res) => {
+  const { idToken } = req.body;
+
+  if (!idToken) {
+    throw new ApiError(400, "Google authentication token is required.");
+  }
+
+// Verify Google Token
+  const { googleId, email, avatarUrl } = await verifyGoogleIdToken(idToken);
+
+  // Find User by Google ID or Email
+  const user = await prisma.user.findFirst({
+    where: {
+      OR: [{ googleId: googleId }, { email: email }],
+    },
+  });
+
+  if (!user) {
+    throw new ApiError(
+      404,
+      "No account found with this Google email. If you are an Organization Owner, please register your workspace first."
+    );
+  }
+
+  // Strict Role Gatekeeper (Block Staff & Branch Managers from Google Login)
+  if (!["ORG_OWNER", "SUPER_ADMIN"].includes(user.role)) {
+    throw new ApiError(
+      403,
+      "Google Sign-In is strictly reserved for Organization Owners. Staff and Branch Managers must log in using their Official Staff ID and password."
+    );
+  }
+
+  // Step 4: Status Check
+  if (user.status !== "ACTIVE") {
+    throw new ApiError(403, "Your account is currently suspended or inactive.");
+  }
+
+  // Step 5: Generate Session Tokens & Self-Healing Account Linking
+  const accessToken = await generateAccessToken(user);
+  const refreshToken = await generateRefreshToken(user);
+
+  const updatedUser = await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      refreshToken: refreshToken,
+      googleId: user.googleId || googleId,
+      avatarUrl: user.avatarUrl || avatarUrl,
+    },
+    select: {
+      id: true,
+      tenantId: true,
+      branchId: true,
+      fullName: true,
+      email: true,
+      avatarUrl: true,
+      role: true,
+      status: true,
+    },
+  });
+
+  const isProduction = process.env.NODE_ENV === "production";
+  const cookieOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
+  };
+
+  return res
+    .status(200)
+    .cookie("accessToken", accessToken, cookieOptions)
+    .cookie("refreshToken", refreshToken, cookieOptions)
+    .json(
+      new ApiResponse(
+        200,
+        {
+          user: updatedUser,
+          accessToken,
+          refreshToken,
+        },
+        "Owner logged in successfully via Google"
+      )
+    );
 });
 
