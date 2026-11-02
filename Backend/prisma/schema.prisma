@@ -37,6 +37,7 @@ enum BillingCycle {
 enum UserRole {
   SUPER_ADMIN
   ORG_OWNER
+  HR               
   BRANCH_MANAGER
   STAFF
 }
@@ -77,6 +78,7 @@ enum LedgerEventType {
   EWA_ADVANCE
   BOUNTY_CREDITED
   REFUND_PROCESSED
+  EXPENSE_RECORDED 
 }
 
 enum EwaStatus {
@@ -85,28 +87,53 @@ enum EwaStatus {
   REJECTED
 }
 
-// [NEW] Reference Type for Polymorphic Relations
+enum ExpenseCategory {
+  RENT
+  UTILITIES
+  SUPPLIES
+  MARKETING
+  MAINTENANCE
+  OTHER
+}
+
+enum WorkflowStatus {
+  PENDING
+  IN_PROGRESS
+  APPROVED
+  REJECTED
+}
+
+enum StepAction {
+  SUBMITTED
+  APPROVED_AND_FORWARDED
+  FINAL_APPROVED
+  REJECTED
+}
+
 enum ReferenceType {
   INVOICE
   EWA_REQUEST
   USER
   PAYROLL
+  EXPENSE          
+  DOCUMENT         
 }
 
 // ==========================================
 // 2. TENANT & SUBSCRIPTION (SaaS Core)
 // ==========================================
 model Tenant {
-  id                 String             @id @default(uuid())
+  id                 String               @id @default(uuid())
   name               String
   businessType       BusinessType
   subscriptionStatus SubscriptionStatus @default(ACTIVE)
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
-  tenantCode         String              @unique
+  tenantCode         String             @unique
   
   subscription       PlatformSubscription?
   
+  // Opposite relation fields required by Prisma
   branches           Branch[]
   users              User[]
   catalogItems       CatalogItem[]
@@ -114,6 +141,9 @@ model Tenant {
   ledgerEvents       LedgerEvent[]
   ewaRequests        EwaRequest[]
   auditLogs          AuditLog[]
+  expenses           Expense[]          
+  documents          DocumentRequest[]  
+  approvalSteps      DocumentApprovalStep[] 
 
   @@map("tenants")
 }
@@ -151,6 +181,8 @@ model Branch {
   
   catalogItems  CatalogItem[]
   invoices      Invoice[]
+  expenses      Expense[] 
+  documents     DocumentRequest[] 
 
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -159,40 +191,53 @@ model Branch {
 }
 
 model User {
-  id               String     @id @default(uuid())
-  tenantId         String
-  tenant           Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  staffId          String?    @unique 
+  id              String     @id @default(uuid())
+  tenantId        String
+  tenant          Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  staffId         String?    @unique 
 
-  googleId         String?    @unique
+  googleId        String?    @unique
 
-  branchId         String?
-  branch           Branch?    @relation("BranchStaff", fields: [branchId], references: [id])
-  managedBranch    Branch?    @relation("BranchManager")
+  branchId        String?
+  // Use SetNull to avoid deleting staff if a branch is deleted
+  branch          Branch?    @relation("BranchStaff", fields: [branchId], references: [id], onDelete: SetNull)
+  managedBranch   Branch?    @relation("BranchManager")
   
-  email            String     
-  fullName         String
-  password         String
-  avatarUrl        String?
-  role             UserRole   
-  status           UserStatus @default(PENDING)
+  email           String      
+  fullName        String
+  password        String
   
-  baseSalary       Decimal    @default(0)
-  earnedCommission Decimal    @default(0)
-  refreshToken     String?
+  // Identity & Org Chart Fields
+  designation     String?    @default("Staff") 
+  department      String?                      
+  
+  avatarUrl       String?
+  role            UserRole   
+  status          UserStatus @default(PENDING)
+  
+  baseSalary      Decimal    @default(0)
+  earnedCommission Decimal   @default(0)
+  refreshToken    String?
 
   forgotPasswordToken  String?
   forgotPasswordExpiry DateTime?
   
-  createdAt        DateTime   @default(now())
-  updatedAt        DateTime   @updatedAt
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
-  createdInvoices  Invoice[]    @relation("InvoiceCreator")
-  ewaRequests      EwaRequest[] @relation("EwaStaff")
-  approvedEwas     EwaRequest[] @relation("EwaApprover")
-  auditLogs        AuditLog[]   @relation("UserAudit")
+  // Opposite relations required by Prisma
+  createdInvoices Invoice[]    @relation("InvoiceCreator")
+  ewaRequests     EwaRequest[] @relation("EwaStaff")
+  approvedEwas    EwaRequest[] @relation("EwaApprover")
+  auditLogs       AuditLog[]   @relation("UserAudit")
+  
+  expensesRecorded  Expense[]              @relation("ExpenseRecorder")
+  documentsCreated  DocumentRequest[]      @relation("DocumentCreator")
+  documentsAssigned DocumentRequest[]      @relation("DocumentAssignee")
+  approvalSteps     DocumentApprovalStep[] @relation("StepReviewer")
+  forwardedSteps    DocumentApprovalStep[] @relation("StepForwardedTo")
 
-  @@unique([email, tenantId]) // Composite Unique for Multi-tenant notification isolation
+  @@unique([email, tenantId]) // Composite Unique for Multi-tenant isolation
   @@map("users")
 }
 
@@ -213,7 +258,6 @@ model CatalogItem {
 
   stock           Int?
   lastRestockedAt DateTime?
-  // isDeadStock Boolean @default(false) -> [REMOVED]
   
   bountyAmount    Decimal   @default(0)
   imageUrl        String?
@@ -293,7 +337,7 @@ model LedgerEvent {
   amount          Decimal
 
   referenceId     String          
-  referenceType   ReferenceType   // [FIXED] Polymorphic Type
+  referenceType   ReferenceType   
 
   createdAt       DateTime        @default(now())
 
@@ -334,4 +378,83 @@ model AuditLog {
   createdAt       DateTime    @default(now())
 
   @@map("audit_logs")
+}
+
+// ==========================================
+// 7. EXPENSE MANAGEMENT (Petty Cash & Bills) 
+// ==========================================
+model Expense {
+  id              String          @id @default(uuid())
+  tenantId        String
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branchId        String?
+  branch          Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  
+  recordedById    String
+  recordedBy      User            @relation("ExpenseRecorder", fields: [recordedById], references: [id])
+
+  category        ExpenseCategory
+  amount          Decimal
+  description     String
+  receiptUrl      String?
+
+  createdAt       DateTime        @default(now())
+
+  @@map("expenses")
+}
+
+// ==========================================
+// 8. ENTERPRISE E-FILING (Document Workflow) 
+// ==========================================
+model DocumentRequest {
+  id                String                 @id @default(uuid())
+  tenantId          String
+  tenant            Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  branchId          String?
+  branch            Branch?                @relation(fields: [branchId], references: [id], onDelete: SetNull)
+
+  title             String
+  description       String?
+  fileUrl           String
+  fileType          String                 // e.g., PDF, DOCX, XLSX, IMAGE
+  
+  creatorId         String
+  creator           User                   @relation("DocumentCreator", fields: [creatorId], references: [id])
+  
+  currentAssigneeId String
+  currentAssignee   User                   @relation("DocumentAssignee", fields: [currentAssigneeId], references: [id])
+
+  status            WorkflowStatus         @default(PENDING)
+  
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  approvalSteps     DocumentApprovalStep[]
+
+  @@map("document_requests")
+}
+
+model DocumentApprovalStep {
+  id                String           @id @default(uuid())
+  tenantId          String
+  tenant            Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  documentRequestId String
+  documentRequest   DocumentRequest  @relation(fields: [documentRequestId], references: [id], onDelete: Cascade)
+  
+  stepNumber        Int
+  
+  reviewerId        String
+  reviewer          User             @relation("StepReviewer", fields: [reviewerId], references: [id])
+  
+  forwardedToId     String?
+  forwardedTo       User?            @relation("StepForwardedTo", fields: [forwardedToId], references: [id])
+  
+  action            StepAction
+  remarks           String?
+  
+  actionAt          DateTime         @default(now())
+
+  @@map("document_approval_steps")
 }
