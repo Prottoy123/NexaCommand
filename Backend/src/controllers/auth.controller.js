@@ -21,6 +21,8 @@ export const generateAccessToken = async (user) => {
   return jwt.sign(
     {
       id: user.id,
+      tenantId: user.tenantId, // Added tenantId to JWT payload per architecture spec
+      branchId: user.branchId, // Added branchId to JWT payload per architecture spec
       email: user.email,
       fullName: user.fullName,
       role: user.role,
@@ -52,7 +54,7 @@ export const registerTenant = asyncHandler(async (req, res) => {
   }
 
   const userExists = await prisma.user.findFirst({
-    where: { email },
+    where: { email: email.toLowerCase().trim() }, // Normalized email lookup
   });
 
   if (userExists) {
@@ -65,7 +67,7 @@ export const registerTenant = asyncHandler(async (req, res) => {
 
   const newTenant = await prisma.tenant.create({
     data: {
-      name: tenantName,
+      name: tenantName.trim(),
       tenantCode: generatedTenantCode,
       businessType: businessType,
       subscription: {
@@ -75,10 +77,12 @@ export const registerTenant = asyncHandler(async (req, res) => {
       },
       users: {
         create: {
-          fullName: fullName,
-          email: email,
+          fullName: fullName.trim(),
+          email: email.toLowerCase().trim(),
           password: passwordHash,
           role: "ORG_OWNER",
+          designation: "Founder & CEO", // Added default executive designation for Org Owner
+          department: "Management",     // Added default department for Org Owner
           status: "ACTIVE",
         },
       },
@@ -95,6 +99,8 @@ export const registerTenant = asyncHandler(async (req, res) => {
           fullName: true,
           email: true,
           role: true,
+          designation: true, // Projected designation in registration response
+          department: true,  // Projected department in registration response
           status: true,
         },
       },
@@ -140,11 +146,11 @@ export const loginUser = asyncHandler(async (req, res) => {
     if (!user) {
       throw new ApiError(
         401,
-        "Invalid credentials. Note: Staff members must log in using their Official Staff ID, not email."
+        // Updated error message to include HR alongside Staff and Branch Managers
+        "Invalid credentials. Note: Staff, HR, and Branch Managers must log in using their Official Staff ID, not email."
       );
     }
   } else {
-    // Staff / Branch Manager Login via Globally Unique Staff ID
     user = await prisma.user.findUnique({
       where: {
         staffId: loginInput.toUpperCase(),
@@ -193,6 +199,8 @@ export const loginUser = asyncHandler(async (req, res) => {
     email: user.email,
     avatarUrl: user.avatarUrl,
     role: user.role,
+    designation: user.designation, // Added designation to login payload for frontend state
+    department: user.department,   // Added department to login payload for frontend state
     status: user.status,
   };
 
@@ -221,7 +229,7 @@ export const loginUser = asyncHandler(async (req, res) => {
 });
 
 export const logoutUser = asyncHandler(async (req, res) => {
-  const loggedOutUser = await prisma.user.update({
+  await prisma.user.update({
     where: { id: req.user.id },
     data: { refreshToken: null },
     select: {
@@ -229,10 +237,12 @@ export const logoutUser = asyncHandler(async (req, res) => {
     },
   });
 
+  // Fixed cookie options to match loginUser for local development compatibility
+  const isProduction = process.env.NODE_ENV === "production";
   const options = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "none",
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
   };
 
   return res
@@ -243,7 +253,27 @@ export const logoutUser = asyncHandler(async (req, res) => {
 });
 
 export const getCurrentUser = asyncHandler(async (req, res) => {
-  const currentUser = req.user;
+  // Updated to fetch fresh user state, designation, and department from DB for Redux hydration
+  const currentUser = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: {
+      id: true,
+      tenantId: true,
+      branchId: true,
+      staffId: true,
+      fullName: true,
+      email: true,
+      avatarUrl: true,
+      role: true,
+      designation: true,
+      department: true,
+      status: true,
+    },
+  });
+
+  if (!currentUser || currentUser.status !== "ACTIVE") {
+    throw new ApiError(403, "User session is no longer active");
+  }
 
   return res
     .status(200)
@@ -257,7 +287,6 @@ export const getCurrentUser = asyncHandler(async (req, res) => {
 });
 
 export const refreshAccessToken = asyncHandler(async (req, res) => {
- 
   const incomingRefreshToken =
     req.cookies.refreshToken || req.body.refreshToken;
 
@@ -286,18 +315,21 @@ export const refreshAccessToken = asyncHandler(async (req, res) => {
       );
     }
 
-    const accessToken = generateAccessToken(user);
-    const newRefreshToken = generateRefreshToken(user);
+    // Added missing await keywords since token generators are async functions
+    const accessToken = await generateAccessToken(user);
+    const newRefreshToken = await generateRefreshToken(user);
 
     await prisma.user.update({
       where: { id: user.id },
       data: { refreshToken: newRefreshToken },
     });
 
+    // Standardized cookie options for cross-environment consistency
+    const isProduction = process.env.NODE_ENV === "production";
     const options = {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "none",
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
     };
 
     return res
@@ -329,14 +361,15 @@ export const updateAccount = asyncHandler(async (req, res) => {
   const oldAvatarUrl = currentUser?.avatarUrl;
 
   if (fullName) {
-    updateData.fullName = fullName;
+    updateData.fullName = fullName.trim();
   }
 
   if (email) {
+    const normalizedEmail = email.toLowerCase().trim(); // Normalized email before composite check
     const existingUser = await prisma.user.findUnique({
       where: {
         email_tenantId: {
-          email: email,
+          email: normalizedEmail,
           tenantId: req.user.tenantId,
         },
       },
@@ -345,7 +378,7 @@ export const updateAccount = asyncHandler(async (req, res) => {
     if (existingUser && existingUser.id !== req.user.id) {
       throw new ApiError(409, "Email already exists in your organization");
     }
-    updateData.email = email;
+    updateData.email = normalizedEmail;
   }
 
   if (req.file && req.file.path) {
@@ -367,10 +400,15 @@ export const updateAccount = asyncHandler(async (req, res) => {
       select: {
         id: true,
         tenantId: true,
+        branchId: true,    // Added branchId to keep Redux state complete
+        staffId: true,     // Added staffId to keep Redux state complete
         fullName: true,
         email: true,
         avatarUrl: true,
         role: true,
+        designation: true, // Added designation to updated profile response
+        department: true,  // Added department to updated profile response
+        status: true,
       },
     });
 
@@ -448,6 +486,8 @@ export const changePassword = asyncHandler(async (req, res) => {
       email: true,
       avatarUrl: true,
       role: true,
+      designation: true, // Projected designation
+      department: true,  // Projected department
     },
   });
 
@@ -481,7 +521,7 @@ export const forgotPassword = asyncHandler(async (req, res) => {
   const recoveryInput = (identifier || email || staffId)?.trim();
 
   if (!recoveryInput) {
-    throw new ApiError(400, "Please provide your Email (for Owners) or Official Staff ID (for Staff)");
+    throw new ApiError(400, "Please provide your Email (for Owners) or Official Staff ID (for Staff, HR & Managers)"); // Updated prompt message to include HR & Managers
   }
 
   const genericSuccessMessage =
@@ -497,7 +537,6 @@ export const forgotPassword = asyncHandler(async (req, res) => {
       },
     });
   } else {
-    // Staff / Branch Manager lookup by Globally Unique Staff ID
     user = await prisma.user.findUnique({
       where: {
         staffId: recoveryInput.toUpperCase(),
@@ -620,8 +659,6 @@ export const resetPassword = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, null, "Password reset successfully. You can now log in."));
 });
 
-//Google Register & Login 
-
 export const googleRegisterTenant = asyncHandler(async (req, res) => {
   const { idToken, tenantName, businessType } = req.body;
 
@@ -637,12 +674,11 @@ export const googleRegisterTenant = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Invalid business type. Must be RETAIL, CORPORATE, or AGENCY.");
   }
 
-  // Verify Google Token via Config Utility
   const { googleId, email, fullName, avatarUrl } = await verifyGoogleIdToken(idToken);
 
   const existingUser = await prisma.user.findFirst({
     where: {
-      OR: [{ email: email }, { googleId: googleId }],
+      OR: [{ email: email.toLowerCase().trim() }, { googleId: googleId }],
     },
   });
 
@@ -653,14 +689,12 @@ export const googleRegisterTenant = asyncHandler(async (req, res) => {
     );
   }
 
-  // Cryptographic Dummy Password & Workspace Code Generation
   const dummyPasswordHash = await bcrypt.hash(
     crypto.randomBytes(32).toString("hex"),
     10
   );
   const generatedTenantCode = crypto.randomBytes(4).toString("hex").toUpperCase();
 
-  // Atomic Tenant + Subscription + Owner Creation
   const newTenant = await prisma.tenant.create({
     data: {
       name: tenantName.trim(),
@@ -674,11 +708,13 @@ export const googleRegisterTenant = asyncHandler(async (req, res) => {
       users: {
         create: {
           fullName: fullName,
-          email: email,
+          email: email.toLowerCase().trim(),
           googleId: googleId,
           avatarUrl: avatarUrl,
           password: dummyPasswordHash,
-          role: "ORG_OWNER", // Zero-Trust Owner Role
+          role: "ORG_OWNER",
+          designation: "Founder & CEO", // Added default executive designation for Google Org Owner
+          department: "Management",     // Added default department for Google Org Owner
           status: "ACTIVE",
         },
       },
@@ -690,7 +726,6 @@ export const googleRegisterTenant = asyncHandler(async (req, res) => {
 
   const ownerUser = newTenant.users[0];
 
-  // Auto-Login (Generate JWT Tokens immediately after Google Sign-Up)
   const accessToken = await generateAccessToken(ownerUser);
   const refreshToken = await generateRefreshToken(ownerUser);
 
@@ -699,7 +734,6 @@ export const googleRegisterTenant = asyncHandler(async (req, res) => {
     data: { refreshToken: refreshToken },
   });
 
-  // Step 7: Audit Log
   await prisma.auditLog.create({
     data: {
       tenantId: newTenant.id,
@@ -730,6 +764,8 @@ export const googleRegisterTenant = asyncHandler(async (req, res) => {
       email: ownerUser.email,
       avatarUrl: ownerUser.avatarUrl,
       role: ownerUser.role,
+      designation: ownerUser.designation, // Added designation to Google sign-up payload
+      department: ownerUser.department,   // Added department to Google sign-up payload
       status: ownerUser.status,
     },
     accessToken,
@@ -747,7 +783,7 @@ export const googleRegisterTenant = asyncHandler(async (req, res) => {
         "Organization registered and logged in successfully via Google"
       )
     );
-});
+  });
 
 export const googleLogin = asyncHandler(async (req, res) => {
   const { idToken } = req.body;
@@ -756,13 +792,11 @@ export const googleLogin = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Google authentication token is required.");
   }
 
-// Verify Google Token
   const { googleId, email, avatarUrl } = await verifyGoogleIdToken(idToken);
 
-  // Find User by Google ID or Email
   const user = await prisma.user.findFirst({
     where: {
-      OR: [{ googleId: googleId }, { email: email }],
+      OR: [{ googleId: googleId }, { email: email.toLowerCase().trim() }],
     },
   });
 
@@ -773,20 +807,18 @@ export const googleLogin = asyncHandler(async (req, res) => {
     );
   }
 
-  // Strict Role Gatekeeper (Block Staff & Branch Managers from Google Login)
   if (!["ORG_OWNER", "SUPER_ADMIN"].includes(user.role)) {
     throw new ApiError(
       403,
-      "Google Sign-In is strictly reserved for Organization Owners. Staff and Branch Managers must log in using their Official Staff ID and password."
+      // Updated error message to explicitly mention HR alongside Staff and Branch Managers
+      "Google Sign-In is strictly reserved for Organization Owners. Staff, HR, and Branch Managers must log in using their Official Staff ID and password."
     );
   }
 
-  // Step 4: Status Check
   if (user.status !== "ACTIVE") {
     throw new ApiError(403, "Your account is currently suspended or inactive.");
   }
 
-  // Step 5: Generate Session Tokens & Self-Healing Account Linking
   const accessToken = await generateAccessToken(user);
   const refreshToken = await generateRefreshToken(user);
 
@@ -805,6 +837,8 @@ export const googleLogin = asyncHandler(async (req, res) => {
       email: true,
       avatarUrl: true,
       role: true,
+      designation: true, // Added designation to Google login projection
+      department: true,  // Added department to Google login projection
       status: true,
     },
   });
@@ -832,4 +866,3 @@ export const googleLogin = asyncHandler(async (req, res) => {
       )
     );
 });
-
