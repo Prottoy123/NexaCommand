@@ -4,7 +4,7 @@ import crypto from "crypto";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
-import { stat } from "fs";
+import sendEmail from "../utils/sendEmail.js"; // Added missing sendEmail utility import
 import { calculatePayrollData } from '../service/payroll.service.js';
 
 const prisma = new PrismaClient();
@@ -50,11 +50,12 @@ export const createBranch = asyncHandler(async (req, res) => {
 });
 
 export const addStaff = asyncHandler(async (req, res) => {
-  const { fullName, email, baseSalary } = req.body;
+  const { fullName, email, baseSalary, designation, department, branchId, role } = req.body;
   const tenantId = req.user.tenantId;
 
-  if (!fullName?.trim() || !email?.trim() || baseSalary === undefined) {
-    throw new ApiError(400, "Full name, email, and base salary are required.");
+  // Added mandatory designation check alongside fullName, email, and baseSalary
+  if (!fullName?.trim() || !email?.trim() || baseSalary === undefined || !designation?.trim()) {
+    throw new ApiError(400, "Full name, email, designation, and base salary are required.");
   }
 
   const sanitizedEmail = email.trim().toLowerCase();
@@ -64,7 +65,29 @@ export const addStaff = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Base salary must be a valid positive number.");
   }
 
-  //Composite Unique Check (Same email cannot be added twice in the SAME company)
+  // Role Hierarchy Enforcement: Determine and validate target role
+  const requestedRole = role ? role.trim().toUpperCase() : "STAFF";
+  if (!["STAFF", "HR"].includes(requestedRole)) {
+    throw new ApiError(400, "Invalid role. Only 'STAFF' or 'HR' can be provisioned through this endpoint.");
+  }
+
+  // Strict Lock: An HR user can only provision regular STAFF, never another HR
+  if (req.user.role === "HR" && requestedRole !== "STAFF") {
+    throw new ApiError(403, "Access denied. HR personnel can only provision regular staff members.");
+  }
+
+  // Optional Branch Validation: Verify branch belongs to tenant if branchId is provided for STAFF
+  let assignedBranchId = null;
+  if (branchId?.trim() && requestedRole === "STAFF") {
+    const branchExists = await prisma.branch.findFirst({
+      where: { id: branchId.trim(), tenantId }
+    });
+    if (!branchExists) {
+      throw new ApiError(404, "Selected branch not found in your organization.");
+    }
+    assignedBranchId = branchExists.id;
+  }
+
   const existingUser = await prisma.user.findUnique({
     where: {
       email_tenantId: {
@@ -94,8 +117,8 @@ export const addStaff = asyncHandler(async (req, res) => {
   const generatedStaffId = `${tenantPrefix}-${randomDigits}`;
 
   // High-Entropy Temporary Password Generation (8 Characters)
-  const tempPasswordPlain = crypto.randomBytes(4).toString("hex"); // ইমেইলে পাঠানোর জন্য Plain Text
-  const hashedTempPassword = await bcrypt.hash(tempPasswordPlain, 10); // ডেটাবেসে রাখার জন্য Hashed
+  const tempPasswordPlain = crypto.randomBytes(4).toString("hex"); // Plain Text for dispatching via email
+  const hashedTempPassword = await bcrypt.hash(tempPasswordPlain, 10); // Hashed for storing in database
 
   // Database Insertion (Status remains PENDING until they change the temp password)
   const newStaff = await prisma.user.create({
@@ -104,7 +127,10 @@ export const addStaff = asyncHandler(async (req, res) => {
       email: sanitizedEmail,
       staffId: generatedStaffId,
       password: hashedTempPassword,
-      role: "STAFF",
+      role: requestedRole, // Dynamically set validated role (STAFF or HR)
+      designation: designation.trim(), // Save official designation for org chart & e-filing search
+      department: department?.trim() || (requestedRole === "HR" ? "Human Resources" : null), // Save department
+      branchId: assignedBranchId, // Link to branch if provided
       baseSalary: salary,
       tenantId: tenantId,
       status: "PENDING",
@@ -115,20 +141,23 @@ export const addStaff = asyncHandler(async (req, res) => {
       fullName: true,
       email: true,
       role: true,
+      designation: true, 
+      department: true, 
+      branchId: true,    
       baseSalary: true,
       status: true,
     },
   });
 
-  // Dispatch Email with Staff ID & Temporary Password
   const activationUrl = `${process.env.FRONTEND_URL}/activate-account?staffId=${generatedStaffId}`;
   const emailMessage = `Hello ${newStaff.fullName},
 
-You have been invited to join ${tenantDetails.name} on NexaCommand.
+You have been invited to join ${tenantDetails.name} as ${newStaff.designation} on NexaCommand.
 
 Here are your official login credentials:
 -----------------------------------------
 Official Staff ID : ${generatedStaffId}
+Designation       : ${newStaff.designation}
 Temporary Password: ${tempPasswordPlain}
 -----------------------------------------
 
@@ -153,7 +182,7 @@ Please keep your Staff ID safe, as you will use this ID (not your email) for all
     data: {
       tenantId: tenantId,
       userId: req.user.id, 
-      action: `PROVISIONED_STAFF_${generatedStaffId}`,
+      action: `PROVISIONED_${requestedRole}_${generatedStaffId}`, // Updated audit log action to reflect exact role provisioned
       targetResource: "USER",
     },
   });
@@ -232,6 +261,8 @@ export const acceptInvite = asyncHandler(async (req, res) => {
       fullName: true,
       email: true,
       role: true,
+      designation: true, // Projected designation on account activation
+      department: true,  // Projected department on account activation
       status: true,
     },
   });
@@ -283,6 +314,11 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Action denied. You cannot modify the status of an administrator or owner.");
     }
 
+    // Peer-Level Hierarchy Protection: Prevent HR from suspending or modifying another HR
+    if (req.user.role === 'HR' && targetUser.role === 'HR') {
+        throw new ApiError(403, "Action denied. HR personnel cannot modify the status of another HR member.");
+    }
+
     if (targetUser.status === status) {
         throw new ApiError(400, `User is already in '${status}' state.`);
     }
@@ -311,7 +347,19 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
             fullName: true,
             email: true,
             role: true,
+            designation: true, // Projected designation
+            department: true,  // Projected department
             status: true
+        }
+    });
+
+    // Added AuditLog entry to track user suspension/activation
+    await prisma.auditLog.create({
+        data: {
+            tenantId: req.user.tenantId,
+            userId: req.user.id,
+            action: `USER_STATUS_${status}_${updatedUser.staffId || updatedUser.id}`,
+            targetResource: "USER"
         }
     });
 
@@ -341,7 +389,8 @@ export const getBranchList = asyncHandler(async (req, res) => {
                     staffId: true,
                     fullName: true,
                     email: true,
-                    role: true
+                    role: true,
+                    designation: true // Projected manager's designation
                 }
             },
             _count: {
@@ -396,8 +445,9 @@ export const assignManager = asyncHandler(async (req, res) => {
         throw new ApiError(400, "User must be active to be assigned as a branch manager.");
     }
 
-    if (['SUPER_ADMIN', 'ORG_OWNER'].includes(existingUser.role)) {
-        throw new ApiError(403, "Action denied. Owners or Admins cannot be assigned as branch managers.");
+    // Included HR in restricted roles so central HR is not accidentally demoted to single branch manager
+    if (['SUPER_ADMIN', 'ORG_OWNER', 'HR'].includes(existingUser.role)) {
+        throw new ApiError(403, "Action denied. Owners, Admins, or Central HR cannot be assigned as branch managers.");
     }
 
     if (existingUser.managedBranch) {
@@ -408,7 +458,9 @@ export const assignManager = asyncHandler(async (req, res) => {
         const updatedUser = await prismaTx.user.update({
             where: { id: existingUser.id },
             data: { 
-                role: "BRANCH_MANAGER"
+                role: "BRANCH_MANAGER",
+                branchId: existingBranch.id, // Critical Fix: Sync user's branchId with the branch they are assigned to manage
+                designation: existingUser.designation === "Staff" ? "Branch Manager" : existingUser.designation // Auto-upgrade default designation
             },
             select: {
                 id: true,
@@ -416,6 +468,8 @@ export const assignManager = asyncHandler(async (req, res) => {
                 fullName: true,
                 email: true,
                 role: true,
+                designation: true, // Projected designation
+                department: true,  // Projected department
                 status: true,
                 branchId: true
             }
@@ -435,7 +489,8 @@ export const assignManager = asyncHandler(async (req, res) => {
                         staffId: true,
                         fullName: true,
                         email: true,
-                        role: true
+                        role: true,
+                        designation: true
                     }
                 },
                 _count: {
@@ -485,13 +540,18 @@ export const removeManager = asyncHandler(async (req, res) => {
         // (They remain physically in the branch as a regular staff member)
         const demotedUser = await prismaTx.user.update({
             where: { id: existingBranch.managerId },
-            data: { role: "STAFF" },
+            data: { 
+                role: "STAFF",
+                designation: "Staff" // Reset designation upon demotion to regular staff
+            },
             select: {
                 id: true,
                 staffId: true,
                 fullName: true,
                 email: true,
                 role: true,
+                designation: true, // Projected designation
+                department: true,  // Projected department
                 status: true,
                 branchId: true
             }
@@ -558,7 +618,7 @@ export const generatePayroll = asyncHandler(async (req, res) => {
     const transactionOperations = [];
 
     for (const staff of payrollData.details) {
-        // Record the salary disbursement in the ledger[cite: 8]
+        // Record the salary disbursement in the ledger
         transactionOperations.push(
             prisma.ledgerEvent.create({
                 data: {
@@ -574,7 +634,7 @@ export const generatePayroll = asyncHandler(async (req, res) => {
             })
         );
 
-        // Reset the staff's earned commission back to 0 for the next month[cite: 8]
+        // Reset the staff's earned commission back to 0 for the next month
         transactionOperations.push(
             prisma.user.update({
                 where: { id: staff.userId },
@@ -596,7 +656,8 @@ export const generatePayroll = asyncHandler(async (req, res) => {
 
 export const getStaffList = asyncHandler(async(req, res) => {
     const tenantId = req.user.tenantId;
-    const { limit, page, search } = req.query;
+    // Added role, branchId, and status query filters for HR & Owner directory versatility
+    const { limit, page, search, role, branchId, status } = req.query;
 
     const pageNumber = Math.max(1, parseInt(page) || 1);
     const limitNumber = Math.max(1, parseInt(limit) || 10);
@@ -608,14 +669,29 @@ export const getStaffList = asyncHandler(async(req, res) => {
 
     const where = {
         tenantId: tenantId,
-        role: { in: ['STAFF', 'BRANCH_MANAGER'] }
+        // Included HR alongside STAFF and BRANCH_MANAGER in global directory
+        role: role && ['STAFF', 'BRANCH_MANAGER', 'HR'].includes(role.toUpperCase())
+            ? role.toUpperCase()
+            : { in: ['STAFF', 'BRANCH_MANAGER', 'HR'] }
     };
 
-    if (search) {
+    // Optional filtering by branchId and user status
+    if (branchId?.trim()) {
+        where.branchId = branchId.trim();
+    }
+
+    if (status && ['ACTIVE', 'SUSPENDED', 'PENDING'].includes(status.toUpperCase())) {
+        where.status = status.toUpperCase();
+    }
+
+    if (search?.trim()) {
+        const cleanSearch = search.trim();
         where.OR = [
-            { fullName: { contains: search, mode: 'insensitive' } },
-            { email: { contains: search, mode: 'insensitive' } },
-            { staffId: { contains: search, mode: 'insensitive' } }
+            { fullName: { contains: cleanSearch, mode: 'insensitive' } },
+            { email: { contains: cleanSearch, mode: 'insensitive' } },
+            { staffId: { contains: cleanSearch, mode: 'insensitive' } },
+            { designation: { contains: cleanSearch, mode: 'insensitive' } }, // Added designation search support
+            { department: { contains: cleanSearch, mode: 'insensitive' } }   // Added department search support
         ];
     }
 
@@ -636,9 +712,13 @@ export const getStaffList = asyncHandler(async(req, res) => {
                 fullName: true,
                 email: true,
                 role: true,
+                designation: true, // Projected designation
+                department: true,  // Projected department
                 status: true,
                 branchId: true,
+                baseSalary: true,  // Projected baseSalary for directory overview
                 earnedCommission: true, 
+                createdAt: true,   // Projected joining date
                 branch: {
                     select: {
                         name: true
@@ -646,10 +726,10 @@ export const getStaffList = asyncHandler(async(req, res) => {
                 },
                 _count: {
                     select: {
-                        sales: {
+                        // Critical Fix: Replaced non-existent 'sales' relation with schema-valid 'createdInvoices'
+                        createdInvoices: {
                             where: {
-                                status: "ACTIVE",
-                                commissionEarned: true,
+                                status: "PAID",
                                 createdAt: {
                                     gte: startOfMonth,
                                     lte: endOfMonth
@@ -685,8 +765,3 @@ export const getStaffList = asyncHandler(async(req, res) => {
         }, "Staff directory fetched successfully.")
     );
 });
-
-
-
-
-
