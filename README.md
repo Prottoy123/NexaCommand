@@ -1,6 +1,10 @@
 # NexaCommand
 
-> **Notice:** This is a **temporary project README** documenting the high-level system architecture, core features, current development status across branches, visual process diagrams, and execution guidelines. Frontend development is scheduled to commence upon completion of the backend core.
+> **⚠️ Important Notice & Branching Strategy:**
+> - **Temporary Living README:** This document outlines the overall system architecture, core backend modules, process diagrams, development progress, and execution setup.
+> - **Main Branch Status:** The `main` branch **does not currently contain the active development codebase**. It is intentionally kept minimal and reserved strictly for final, fully-tested, and production-ready code during deployment at the very end of the project.
+> - **Active Development on `dev` & Feature Branches:** All active engineering is carried out across isolated, module-specific feature branches (e.g., `feat-staff`, `backend/feat-org-admin`, `backend/feat-auth`) and integrated via the `dev` branch.
+> - **Frontend Timeline:** Frontend development is intentionally paused and will begin once the backend APIs and database architecture are 100% complete and verified.
 
 ---
 
@@ -149,10 +153,15 @@ flowchart TD
 
 ## 📊 Development Progress & Git Workflow
 
-The project is actively being developed using feature-driven Git branches:
+The project follows a disciplined Git branching model:
+- **`main`**: Production release only. Untested code is never pushed or merged here directly.
+- **`dev`**: Central staging branch where completed feature branches are merged and verified.
+- **Feature Branches**: Granular, module-specific work environments.
 
 | Branch | Focus Area | Status |
 | :--- | :--- | :--- |
+| `main` | Production branch (reserved for final verified release) | Baseline setup |
+| `dev` | Central development integration branch | Active |
 | `backend/feat-auth` | Core engine utilities, JWT & Google Auth, Tenant middleware | Completed |
 | `backend/feat-org-admin` | Branch creation, Staff provisioning, Manager assignments | Completed |
 | `feat-staff` *(Active)* | Staff dashboard, Branch Manager operations, EWA requests | In Progress |
