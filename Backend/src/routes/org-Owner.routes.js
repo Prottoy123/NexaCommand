@@ -11,20 +11,12 @@ import { rateLimiter } from '../middlewares/rateLimiter.middleware.js';
 
 const router = Router();
 
-// ==========================================
-// 1. PUBLIC ROUTES (No JWT Required)
-// ==========================================
-
 // Activate pending staff/manager account using the email invitation token
 router.post(
     '/accept-invite',
-    rateLimiter('accept-invite', 5, 900), // Max 5 attempts per 15 minutes (900s) per IP
-    acceptInvite
+    rateLimiter('accept-invite', 5, 900), 
 );
 
-// ==========================================
-// 2. PROTECTED ORG OWNER ROUTES
-// ==========================================
 
 router.post(
     '/create-branch',
@@ -40,6 +32,50 @@ router.post(
     isolateTenant,
     restrictTo('ORG_OWNER'),
     addStaff
+);
+
+router.patch(
+    '/branches/assign-manager',
+    restrictTo('ORG_OWNER'), 
+    assignManager
+);
+
+router.patch(
+    '/branches/remove-manager',
+    restrictTo('ORG_OWNER'), 
+    removeManager
+);
+
+router.post(
+    '/generate-payroll',
+    restrictTo('ORG_OWNER'), 
+    generatePayroll
+);
+
+//shared Route By Org-owner and HR dept
+
+router.get(
+    '/payroll-preview',
+    restrictTo('ORG_OWNER', 'HR'), 
+    payrollPreview
+);
+
+router.get(
+    '/branches/list',
+    restrictTo('ORG_OWNER', 'HR'), 
+    getBranchList
+);
+
+router.patch(
+    '/user-status/:userId',
+    restrictTo('ORG_OWNER', 'HR'),
+    updateUserStatus
+);
+
+router.get(
+    '/staff-list',
+    restrictTo('ORG_OWNER', 'HR'), 
+    getStaffList
 );
 
 export default router;
