@@ -12,7 +12,7 @@ export const calculatePayrollData = async (tenantId) => {
         where: {
             tenantId: tenantId,
             status: "ACTIVE",
-            role: { in: ['STAFF', 'BRANCH_MANAGER'] }
+            role: { in: ['STAFF', 'BRANCH_MANAGER','HR'] }
         },
         select: {
             id: true,
