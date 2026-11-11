@@ -165,3 +165,172 @@ Please keep your Staff ID safe, as you will use this ID (not your email) for all
     )
   );
 });
+
+export const promoteStaff = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const { designation, department, baseSalary, role, targetBranchId } = req.body;
+  const tenantId = req.user.tenantId;
+
+  if (
+    !designation?.trim() ||
+    !department?.trim() ||
+    baseSalary === undefined ||
+    !role?.trim()
+  ) {
+    throw new ApiError(
+      400,
+      "Designation, department, base salary, and role are all required for promotion."
+    );
+  }
+
+  // Prevent user from promoting themselves
+  if (userId === req.user.id) {
+    throw new ApiError(403, "You cannot promote or update your own profile.");
+  }
+
+  const salary = Number(baseSalary);
+  if (isNaN(salary) || salary <= 0) {
+    throw new ApiError(400, "Base salary must be a valid positive number greater than zero.");
+  }
+
+  // Validate target role (only STAFF or BRANCH_MANAGER allowed)
+  const requestedRole = role.trim().toUpperCase();
+  if (!["STAFF", "BRANCH_MANAGER"].includes(requestedRole)) {
+    throw new ApiError(
+      400,
+      "Invalid role. Staff can only hold 'STAFF' or 'BRANCH_MANAGER' roles."
+    );
+  }
+
+  // 4. Fetch target staff member and organization details
+  const [targetStaff, tenantDetails] = await Promise.all([
+    prisma.user.findFirst({
+      where: { id: userId, tenantId: tenantId },
+    }),
+    prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    }),
+  ]);
+
+  if (!targetStaff) {
+    throw new ApiError(404, "Staff member not found in your organization.");
+  }
+
+  // Only ACTIVE staff members can be promoted or transferred
+  if (targetStaff.status !== "ACTIVE") {
+    throw new ApiError(400, "Only ACTIVE staff members are eligible for promotion or transfer.");
+  }
+
+  // Block modifications to Owner, Super Admin, or other HR accounts
+  if (["ORG_OWNER", "SUPER_ADMIN", "HR"].includes(targetStaff.role)) {
+    throw new ApiError(403, "Access denied. You cannot modify Owner or HR accounts.");
+  }
+
+  // 5. Determine target branch (use new targetBranchId if provided, otherwise keep current branchId)
+  const finalBranchId = targetBranchId?.trim() ? targetBranchId.trim() : targetStaff.branchId;
+
+  if (!finalBranchId) {
+    throw new ApiError(400, "A valid branch ID is required for this staff member.");
+  }
+
+  // 6. Execute atomic transaction for Promotion, Branch Manager assignment, and AuditLog
+  const updatedStaff = await prisma.$transaction(async (tx) => {
+
+    const branch = await tx.branch.findFirst({
+      where: { id: finalBranchId, tenantId: tenantId },
+    });
+
+    if (!branch) {
+      throw new ApiError(404, "Target branch not found in your organization.");
+    }
+
+    // If promoted to BRANCH_MANAGER, check if the branch already has a manager
+    if (requestedRole === "BRANCH_MANAGER") {
+      if (branch.managerId && branch.managerId !== targetStaff.id) {
+        throw new ApiError(
+          409,
+          `The ${branch.name} branch already has an assigned Branch Manager.`
+        );
+      }
+
+      // Assign this staff member as the manager of the target branch
+      await tx.branch.update({
+        where: { id: branch.id },
+        data: { managerId: targetStaff.id },
+      });
+    }
+
+    // Update staff profile with all promotion details
+    const promotedUser = await tx.user.update({
+      where: { id: targetStaff.id },
+      data: {
+        designation: designation.trim(),
+        department: department.trim(),
+        baseSalary: salary,
+        role: requestedRole,
+        branchId: branch.id,
+      },
+      select: {
+        id: true,
+        staffId: true,
+        fullName: true,
+        email: true,
+        role: true,
+        designation: true,
+        department: true,
+        baseSalary: true,
+        branchId: true,
+        status: true,
+        updatedAt: true,
+      },
+    });
+
+    // Save complete promotion record in AuditLog
+    await tx.auditLog.create({
+      data: {
+        tenantId: tenantId,
+        userId: req.user.id,
+        action: `PROMOTED_${promotedUser.staffId}_TO_${promotedUser.role}_${promotedUser.designation.toUpperCase().replace(/\s+/g, "_")}_SALARY_${salary}`,
+        targetResource: "USER",
+      },
+    });
+
+    return { promotedUser, branchName: branch.name };
+  });
+
+  // 7. Send official promotion notification email
+  const emailMessage = `Hello ${updatedStaff.promotedUser.fullName},
+
+Congratulations! Your employment profile at ${tenantDetails.name} has been officially updated/promoted.
+
+Here are your updated employment details:
+-----------------------------------------
+Official Staff ID : ${updatedStaff.promotedUser.staffId}
+New Designation   : ${updatedStaff.promotedUser.designation}
+Department        : ${updatedStaff.promotedUser.department}
+System Role       : ${updatedStaff.promotedUser.role}
+Assigned Branch   : ${updatedStaff.branchName}
+Revised Salary    : ${updatedStaff.promotedUser.baseSalary}
+-----------------------------------------
+
+Log in to your NexaCommand dashboard to view your updated profile. Keep up the great work!`;
+
+  try {
+    await sendEmail({
+      email: updatedStaff.promotedUser.email,
+      subject: `Official Promotion & Profile Update - ${tenantDetails.name}`,
+      message: emailMessage,
+    });
+  } catch (error) {
+    console.error("Failed to send promotion email:", error.message);
+  }
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      updatedStaff.promotedUser,
+      "Staff promoted and updated successfully."
+    )
+  );
+});
