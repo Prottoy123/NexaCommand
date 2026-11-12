@@ -334,3 +334,99 @@ Log in to your NexaCommand dashboard to view your updated profile. Keep up the g
     )
   );
 });
+
+export const updateStaffStatus = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const { status } = req.body;
+  const tenantId = req.user.tenantId;
+
+  if (!status?.trim()) {
+    throw new ApiError(400, "Account status is required.");
+  }
+
+  const requestedStatus = status.trim().toUpperCase();
+  if (!["ACTIVE", "SUSPENDED"].includes(requestedStatus)) {
+    throw new ApiError(
+      400,
+      "Invalid status. Status can only be updated to 'ACTIVE' or 'SUSPENDED'."
+    );
+  }
+
+  if (userId === req.user.id) {
+    throw new ApiError(403, "Forbidden. You cannot change your own account status.");
+  }
+
+  const targetUser = await prisma.user.findFirst({
+    where: {
+      id: userId,
+      tenantId: tenantId,
+    },
+  });
+
+  if (!targetUser) {
+    throw new ApiError(404, "Staff member not found in your organization.");
+  }
+
+  if (["ORG_OWNER", "SUPER_ADMIN", "HR"].includes(targetUser.role)) {
+    throw new ApiError(
+      403,
+      "Forbidden. HR portal can only manage the status of STAFF or BRANCH_MANAGER accounts."
+    );
+  }
+
+  if (targetUser.status === "PENDING" && requestedStatus === "ACTIVE") {
+    throw new ApiError(
+      400,
+      "Cannot manually activate a PENDING account. The staff member must accept their invitation email first."
+    );
+  }
+
+  if (targetUser.status === requestedStatus) {
+    throw new ApiError(
+      400,
+      `This staff member's account is already ${requestedStatus}.`
+    );
+  }
+
+  // 7. Update status and kill active session (refreshToken: null) if suspended
+  const updatedStaff = await prisma.$transaction(async (tx) => {
+    const user = await tx.user.update({
+      where: { id: targetUser.id },
+      data: {
+        status: requestedStatus,
+        ...(requestedStatus === "SUSPENDED" && { refreshToken: null }), // Kill session immediately on suspension
+      },
+      select: {
+        id: true,
+        staffId: true,
+        fullName: true,
+        email: true,
+        role: true,
+        designation: true,
+        department: true,
+        branchId: true,
+        status: true,
+        updatedAt: true,
+      },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        tenantId: tenantId,
+        userId: req.user.id,
+        action: `CHANGED_STAFF_STATUS_${user.staffId}_TO_${requestedStatus}`,
+        targetResource: "USER",
+      },
+    });
+
+    return user;
+  });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      updatedStaff,
+      `Staff account status has been updated to ${requestedStatus} successfully.`
+    )
+  );
+});
