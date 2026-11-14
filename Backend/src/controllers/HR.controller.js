@@ -430,3 +430,140 @@ export const updateStaffStatus = asyncHandler(async (req, res) => {
     )
   );
 });
+
+export const getHrDirectory = asyncHandler(async (req, res) => {
+  const {
+    branchId,
+    department,
+    designation,
+    role,
+    status,
+    search,
+    page = 1,
+    limit = 10,
+  } = req.query;
+
+  const tenantId = req.user.tenantId;
+
+  //Safe pagination setup using Math.max to prevent negative skip crashes
+  const currentPage = Math.max(1, parseInt(page, 10) || 1);
+  const pageSize = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
+  const skip = (currentPage - 1) * pageSize;
+
+  // Build base query filter (Isolate by tenant and exclude ORG_OWNER / SUPER_ADMIN)
+  const whereClause = {
+    tenantId: tenantId,
+    id: { not: req.user.id }, // Exclude the currently logged-in user from their own list
+    role: { in: ["STAFF", "BRANCH_MANAGER", "HR"] },
+  };
+
+  // Apply dynamic filters if provided in query params
+
+  if (branchId?.trim()) {
+    whereClause.branchId = branchId.trim();
+  }
+
+  // Filter by department (case-insensitive)
+  if (department?.trim()) {
+    whereClause.department = {
+      contains: department.trim(),
+      mode: "insensitive",
+    };
+  }
+
+  // Filter by designation (case-insensitive)
+  if (designation?.trim()) {
+    whereClause.designation = {
+      contains: designation.trim(),
+      mode: "insensitive",
+    };
+  }
+
+  // Validate and filter by role
+  if (role?.trim()) {
+    const requestedRole = role.trim().toUpperCase();
+    if (!["STAFF", "BRANCH_MANAGER", "HR"].includes(requestedRole)) {
+      throw new ApiError(
+        400,
+        "Invalid role filter. Allowed values are 'STAFF', 'BRANCH_MANAGER', or 'HR'."
+      );
+    }
+    whereClause.role = requestedRole;
+  }
+
+  // Validate and filter by account status
+  if (status?.trim()) {
+    const requestedStatus = status.trim().toUpperCase();
+    if (!["ACTIVE", "SUSPENDED", "PENDING"].includes(requestedStatus)) {
+      throw new ApiError(
+        400,
+        "Invalid status filter. Allowed values are 'ACTIVE', 'SUSPENDED', or 'PENDING'."
+      );
+    }
+    whereClause.status = requestedStatus;
+  }
+
+  // Apply case-insensitive search by fullName, email, or staffId
+  if (search?.trim()) {
+    const searchTerm = search.trim();
+    whereClause.OR = [
+      { fullName: { contains: searchTerm, mode: "insensitive" } },
+      { email: { contains: searchTerm, mode: "insensitive" } },
+      { staffId: { contains: searchTerm, mode: "insensitive" } },
+    ];
+  }
+
+  // Fetch paginated staff list and total count in parallel
+  const [directoryList, totalRecords] = await Promise.all([
+    prisma.user.findMany({
+      where: whereClause,
+      skip: skip,
+      take: pageSize,
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        staffId: true,
+        fullName: true,
+        email: true,
+        avatarUrl: true,
+        role: true,
+        designation: true,
+        department: true,
+        baseSalary: true,
+        earnedCommission: true,
+        status: true,
+        branchId: true,
+        branch: {
+          select: {
+            id: true,
+            name: true,
+            location: true,
+          },
+        },
+        createdAt: true, // Used as Joining Date on the frontend
+      },
+    }),
+    prisma.user.count({
+      where: whereClause,
+    }),
+  ]);
+
+  const totalPages = Math.ceil(totalRecords / pageSize);
+  const responsePayload = {
+    list: directoryList,
+    pagination: {
+      totalRecords,
+      totalPages,
+      currentPage,
+      limit: pageSize,
+    },
+  };
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      responsePayload,
+      "Central HR directory fetched successfully."
+    )
+  );
+});
