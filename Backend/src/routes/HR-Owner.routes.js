@@ -3,6 +3,7 @@ import {
   provisionStaff,
   promoteStaff,
   updateStaffStatus,
+  getStaffDetails,
 } from "../controllers/HR.controller.js";
 import { verifyJWT } from "../middleware/userAuth.middleware.js";
 import { isolateTenant } from "../middleware/tenant.middleware.js";
@@ -22,6 +23,7 @@ router.route("/user-status/:userId").patch(updateUserStatus);
 router.route("/directory").get(getHrDirectory);
 router.route("/staff-list").get(getStaffList);
 router.route("/branches/list").get(getBranchList);
+router.route("/staff/:userId").get(getStaffDetails);
 
 router.route("/payroll-preview").get(payrollPreview);
 
