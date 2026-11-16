@@ -567,3 +567,116 @@ export const getHrDirectory = asyncHandler(async (req, res) => {
     )
   );
 });
+
+export const getStaffDetails = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const tenantId = req.user.tenantId;
+
+  if (!userId?.trim()) {
+    throw new ApiError(400, "Staff user ID is required.");
+  }
+
+  // Calculate start and end of the current month for real-time payroll snapshot
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+  // Fetch staff profile and their EWA request history in parallel
+  const [staffProfile, recentEwaRequests, currentMonthApprovedEwa] = await Promise.all([
+    prisma.user.findFirst({
+      where: {
+        id: userId.trim(),
+        tenantId: tenantId,
+        role: { in: ["STAFF", "BRANCH_MANAGER", "HR"] }, // Exclude ORG_OWNER and SUPER_ADMIN
+      },
+      select: {
+        id: true,
+        staffId: true,
+        fullName: true,
+        email: true,
+        avatarUrl: true,
+        role: true,
+        designation: true,
+        department: true,
+        status: true,
+        baseSalary: true,
+        earnedCommission: true,
+        branchId: true,
+        branch: {
+          select: {
+            id: true,
+            name: true,
+            location: true,
+            contactNumber: true,
+          },
+        },
+        createdAt: true, // Official Joining Date
+        updatedAt: true,
+      },
+    }),
+
+    // Fetch last 10 EWA requests of this staff member
+    prisma.ewaRequest.findMany({
+      where: {
+        staffId: userId.trim(),
+        tenantId: tenantId,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+      select: {
+        id: true,
+        requestedAmount: true,
+        status: true,
+        approvedBy: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+
+    // Sum all APPROVED EWA requests for the current month
+    prisma.ewaRequest.aggregate({
+      where: {
+        staffId: userId.trim(),
+        tenantId: tenantId,
+        status: "APPROVED",
+        createdAt: {
+          gte: startOfMonth,
+          lte: endOfMonth,
+        },
+      },
+      _sum: {
+        requestedAmount: true,
+      },
+    }),
+  ]);
+
+  if (!staffProfile) {
+    throw new ApiError(404, "Staff member not found in your organization.");
+  }
+
+  const baseSalaryNum = Number(staffProfile.baseSalary) || 0;
+  const commissionNum = Number(staffProfile.earnedCommission) || 0;
+  const approvedAdvanceNum = Number(currentMonthApprovedEwa._sum.requestedAmount) || 0;
+  const grossPay = baseSalaryNum + commissionNum;
+  const estimatedNetPayable = Math.max(0, grossPay - approvedAdvanceNum);
+
+  const staffDetailsPayload = {
+    profile: staffProfile,
+    currentMonthFinancials: {
+      baseSalary: baseSalaryNum,
+      earnedCommission: commissionNum,
+      grossPay: grossPay,
+      approvedEwaDeduction: approvedAdvanceNum,
+      estimatedNetPayable: estimatedNetPayable,
+    },
+    recentEwaRequests: recentEwaRequests,
+  };
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      staffDetailsPayload,
+      "Staff details fetched successfully."
+    )
+  );
+});
