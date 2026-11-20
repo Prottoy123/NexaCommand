@@ -681,3 +681,332 @@ export const getStaffDetails = asyncHandler(async (req, res) => {
     )
   );
 });
+
+export const getCentralEwaRequests = asyncHandler(async (req, res) => {
+  const { tenantId, id: reviewerId, role: reviewerRole } = req.user;
+
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 10));
+  const skip = (page - 1) * limit;
+
+  const statusFilter = req.query.status?.trim().toUpperCase() || "PENDING";
+  const roleFilter = req.query.role?.trim().toUpperCase();
+  const branchIdFilter = req.query.branchId?.trim();
+
+  if (!["PENDING", "APPROVED", "REJECTED"].includes(statusFilter)) {
+    throw new ApiError(
+      400,
+      "Invalid status filter. Allowed values are 'PENDING', 'APPROVED', or 'REJECTED'."
+    );
+  }
+
+  // Base filter: isolate tenant and strictly hide reviewer's own requests
+  const whereClause = {
+    tenantId,
+    status: statusFilter,
+    staffId: { not: reviewerId },
+  };
+
+  // Enforce Chain-of-Command visibility based on reviewerRole
+  if (reviewerRole === "HR") {
+    // HR can NEVER view or approve/reject HR requests
+    if (roleFilter === "HR") {
+      throw new ApiError(
+        403,
+        "Forbidden: HR accounts cannot review other HR EWA requests. Only the Organization Owner can handle them."
+      );
+    }
+
+    if (roleFilter === "BRANCH_MANAGER") {
+      whereClause.staff = {
+        role: "BRANCH_MANAGER",
+        ...(branchIdFilter ? { branchId: branchIdFilter } : {}),
+      };
+    } else if (roleFilter === "STAFF") {
+      // Fallback: HR can see STAFF requests only for branches that currently have no assigned manager
+      whereClause.staff = {
+        role: "STAFF",
+        ...(branchIdFilter ? { branchId: branchIdFilter } : {}),
+        branch: { managerId: null },
+      };
+    } else if (roleFilter) {
+      throw new ApiError(
+        400,
+        "Invalid role filter for HR. Allowed values are 'BRANCH_MANAGER' or 'STAFF'."
+      );
+    } else {
+      // Default HR view: all BRANCH_MANAGER requests + fallback STAFF requests from managerless branches
+      whereClause.OR = [
+        {
+          staff: {
+            role: "BRANCH_MANAGER",
+            ...(branchIdFilter ? { branchId: branchIdFilter } : {}),
+          },
+        },
+        {
+          staff: {
+            role: "STAFF",
+            ...(branchIdFilter ? { branchId: branchIdFilter } : {}),
+            branch: { managerId: null },
+          },
+        },
+      ];
+    }
+  } else {
+    // ORG_OWNER has visibility over HR, BRANCH_MANAGER, and STAFF
+    if (roleFilter) {
+      if (!["HR", "BRANCH_MANAGER", "STAFF"].includes(roleFilter)) {
+        throw new ApiError(
+          400,
+          "Invalid role filter. Allowed values are 'HR', 'BRANCH_MANAGER', or 'STAFF'."
+        );
+      }
+      whereClause.staff = {
+        role: roleFilter,
+        ...(branchIdFilter ? { branchId: branchIdFilter } : {}),
+      };
+    } else {
+      whereClause.staff = {
+        role: { in: ["HR", "BRANCH_MANAGER", "STAFF"] },
+        ...(branchIdFilter ? { branchId: branchIdFilter } : {}),
+      };
+    }
+  }
+
+  const [ewaRequests, totalRecords] = await Promise.all([
+    prisma.ewaRequest.findMany({
+      where: whereClause,
+      include: {
+        staff: {
+          select: {
+            id: true,
+            staffId: true,
+            fullName: true,
+            role: true,
+            designation: true,
+            department: true,
+            baseSalary: true,
+            status: true,
+            branch: {
+              select: {
+                id: true,
+                name: true,
+                location: true,
+              },
+            },
+          },
+        },
+      },
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.ewaRequest.count({ where: whereClause }),
+  ]);
+
+  const formattedList = ewaRequests.map((item) => ({
+    ...item,
+    requestedAmount: Number(item.requestedAmount) || 0,
+    staff: {
+      ...item.staff,
+      baseSalary: Number(item.staff.baseSalary) || 0,
+    },
+  }));
+
+  const totalPages = Math.ceil(totalRecords / limit);
+
+  const responsePayload = {
+    list: formattedList,
+    pagination: {
+      totalRecords,
+      totalPages,
+      currentPage: page,
+      limit,
+    },
+  };
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(
+        200,
+        responsePayload,
+        "Central EWA requests fetched successfully."
+      )
+    );
+});
+
+export const decideCentralEwaRequest = asyncHandler(async (req, res) => {
+  const { tenantId, id: reviewerId, role: reviewerRole } = req.user;
+  const { requestId } = req.params;
+  const { decision } = req.body;
+
+  const normalizedDecision = decision?.trim().toUpperCase();
+  if (!["APPROVED", "REJECTED"].includes(normalizedDecision)) {
+    throw new ApiError(
+      400,
+      "Invalid decision. Allowed values are 'APPROVED' or 'REJECTED'."
+    );
+  }
+
+  const ewaRequest = await prisma.ewaRequest.findFirst({
+    where: { id: requestId, tenantId },
+    include: {
+      staff: {
+        select: {
+          id: true,
+          staffId: true,
+          fullName: true,
+          role: true,
+          status: true,
+          branch: {
+            select: {
+              id: true,
+              managerId: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!ewaRequest) {
+    throw new ApiError(404, "EWA request not found in your organization.");
+  }
+
+  // Guard 1: Zero Self-Approval Shield
+  if (ewaRequest.staffId === reviewerId) {
+    throw new ApiError(
+      403,
+      "Forbidden: You cannot approve or reject your own EWA request."
+    );
+  }
+
+  // Guard 2: Strict Chain-of-Command Hierarchy Shield
+  const targetRole = ewaRequest.staff.role;
+
+  if (targetRole === "HR" && reviewerRole !== "ORG_OWNER") {
+    throw new ApiError(
+      403,
+      "Forbidden: Only the Organization Owner is authorized to process an HR member's EWA request."
+    );
+  }
+
+  if (
+    targetRole === "STAFF" &&
+    reviewerRole === "HR" &&
+    ewaRequest.staff.branch?.managerId
+  ) {
+    throw new ApiError(
+      403,
+      "Forbidden: This staff member belongs to a branch with an active Branch Manager. Their EWA must be reviewed by their Branch Manager or the Organization Owner."
+    );
+  }
+
+  // Guard 3: Block cash approval for non-ACTIVE accounts (Rejection is still permitted)
+  if (
+    normalizedDecision === "APPROVED" &&
+    ewaRequest.staff.status !== "ACTIVE"
+  ) {
+    throw new ApiError(
+      400,
+      `Cannot approve EWA request because the employee's account is currently ${ewaRequest.staff.status}.`
+    );
+  }
+
+  if (ewaRequest.status !== "PENDING") {
+    throw new ApiError(
+      400,
+      `Request cannot be updated. Current status is already ${ewaRequest.status}.`
+    );
+  }
+
+  const transactionId =
+    normalizedDecision === "APPROVED"
+      ? `EWA-${crypto
+          .randomBytes(3)
+          .toString("hex")
+          .toUpperCase()}-${Date.now()}`
+      : null;
+
+  // Execute atomic status update, optional LedgerEvent, and AuditLog
+  const result = await prisma.$transaction(async (tx) => {
+    const updateResult = await tx.ewaRequest.updateMany({
+      where: {
+        id: requestId,
+        tenantId,
+        status: "PENDING",
+      },
+      data: {
+        status: normalizedDecision,
+        approvedBy: reviewerId,
+      },
+    });
+
+    if (updateResult.count === 0) {
+      throw new ApiError(
+        409,
+        "Conflict: This EWA request has already been processed."
+      );
+    }
+
+    let ledgerEntry = null;
+    if (normalizedDecision === "APPROVED") {
+      ledgerEntry = await tx.ledgerEvent.create({
+        data: {
+          tenantId,
+          transactionId,
+          eventType: "EWA_ADVANCE",
+          debitAccount: "COMPANY_TREASURY",
+          creditAccount: `${targetRole}_${ewaRequest.staff.staffId}`,
+          amount: ewaRequest.requestedAmount,
+          referenceId: requestId,
+        },
+      });
+    }
+
+    await tx.auditLog.create({
+      data: {
+        tenantId,
+        userId: reviewerId,
+        action: `EWA_${normalizedDecision}_BY_${reviewerRole}_FOR_${targetRole}_AMOUNT_${Number(
+          ewaRequest.requestedAmount
+        )}`,
+        targetResource: requestId,
+      },
+    });
+
+    const updatedRequest = await tx.ewaRequest.findUnique({
+      where: { id: requestId },
+      select: {
+        id: true,
+        status: true,
+        requestedAmount: true,
+        approvedBy: true,
+        updatedAt: true,
+      },
+    });
+
+    return { updatedRequest, ledgerEntry };
+  });
+
+  const responsePayload = {
+    request: {
+      ...result.updatedRequest,
+      requestedAmount: Number(result.updatedRequest.requestedAmount) || 0,
+    },
+    ...(result.ledgerEntry
+      ? { ledgerReference: result.ledgerEntry.transactionId }
+      : {}),
+  };
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(
+        200,
+        responsePayload,
+        `EWA request ${normalizedDecision.toLowerCase()} successfully.`
+      )
+    );
+});
