@@ -1,0 +1,22 @@
+import { Router } from "express";
+import {
+  getMyDashboard,
+  requestEwa,
+  getMyEwaHistory,
+} from "../controllers/staff.controller.js";
+import { verifyJWT } from "../middlewares/userAuth.middleware.js";
+import { isolateTenant } from "../middlewares/tenant.middleware.js";
+import { restrictTo } from "../middlewares/role.middleware.js";
+// import { requireIdempotency } from "../middlewares/idempotency.middleware.js";
+
+const router = Router();
+
+router.use(verifyJWT, isolateTenant, restrictTo("STAFF", "BRANCH_MANAGER", "HR"));
+
+router.route("/my-dashboard").get(getMyDashboard);
+
+router.route("/request-ewa").post(requestEwa);
+
+router.route("/my-ewa-history").get(getMyEwaHistory);
+
+export default router;
