@@ -7,7 +7,7 @@ import {
 import { verifyJWT } from "../middlewares/userAuth.middleware.js";
 import { isolateTenant } from "../middlewares/tenant.middleware.js";
 import { restrictTo } from "../middlewares/role.middleware.js";
-// import { requireIdempotency } from "../middlewares/idempotency.middleware.js";
+import { requireIdempotency } from "../config/redis.config.js"
 
 const router = Router();
 
@@ -18,5 +18,9 @@ router.route("/my-dashboard").get(getMyDashboard);
 router.route("/request-ewa").post(requestEwa);
 
 router.route("/my-ewa-history").get(getMyEwaHistory);
+
+router
+  .route("/request-ewa")
+  .post(requireIdempotency({ ttlSeconds: 5, strict: true }), requestEwa);
 
 export default router;
