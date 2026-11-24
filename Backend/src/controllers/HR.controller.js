@@ -1,12 +1,10 @@
-import { PrismaClient } from "@prisma/client";
+import prisma from "../config/prisma.config.js";
 import crypto from "crypto";
 import bcrypt from "bcrypt";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { sendEmail } from "../utils/sendEmail.js";
-
-const prisma = new PrismaClient();
 
 export const provisionStaff = asyncHandler(async (req, res) => {
   const { fullName, email, branchId, designation, department, baseSalary, role } = req.body;
