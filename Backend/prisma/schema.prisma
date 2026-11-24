@@ -244,6 +244,7 @@ model User {
 // ==========================================
 // 4. THE UNIVERSAL CATALOG (Inventory & Services)
 // ==========================================
+
 model CatalogItem {
   id              String    @id @default(uuid())
   tenantId        String
@@ -267,6 +268,8 @@ model CatalogItem {
 
   invoiceItems    InvoiceItem[]
 
+  @@index([tenantId, branchId])
+  @@index([tenantId, sku])
   @@map("catalog_items")
 }
 
