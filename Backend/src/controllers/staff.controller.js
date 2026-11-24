@@ -1,9 +1,7 @@
-import { PrismaClient } from "@prisma/client";
+import prisma from "../config/prisma.config.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
-
-const prisma = new PrismaClient();
 
 export const getMyDashboard = asyncHandler(async (req, res) => {
   const employeeUserId = req.user.id;

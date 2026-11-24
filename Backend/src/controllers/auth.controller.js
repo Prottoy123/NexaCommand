@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import prisma from "../config/prisma.config.js";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import ApiError from "../utils/ApiError.js";
@@ -6,8 +6,6 @@ import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 import jwt from "jsonwebtoken";
 import { verifyGoogleIdToken } from "../config/google.config.js";
-
-const prisma = new PrismaClient();
 
 const extractPublicIdFromUrl = (url) => {
   if (!url) return null;

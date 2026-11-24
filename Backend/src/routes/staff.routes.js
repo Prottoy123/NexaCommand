@@ -7,7 +7,7 @@ import {
 import { verifyJWT } from "../middlewares/userAuth.middleware.js";
 import { isolateTenant } from "../middlewares/tenant.middleware.js";
 import { restrictTo } from "../middlewares/role.middleware.js";
-import { requireIdempotency } from "../config/redis.config.js"
+import { requireIdempotency } from "../middlewares/idempotency.middleware.js"
 
 const router = Router();
 

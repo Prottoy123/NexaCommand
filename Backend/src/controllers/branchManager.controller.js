@@ -1,9 +1,8 @@
-import { PrismaClient } from "@prisma/client";
+import prisma from "../config/prisma.config.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import asyncHandler from "../utils/asyncHandler.js";
 
-const prisma = new PrismaClient();
 
 export const getBranchStaffList = asyncHandler(async (req, res) => {
   const { tenantId, id: managerId } = req.user;
