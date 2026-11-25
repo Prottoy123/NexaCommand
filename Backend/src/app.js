@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import {requireIdempotency} from "./middlewares/idempotency.middleware.js"
 
 const app = express();
 
